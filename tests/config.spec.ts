@@ -64,6 +64,12 @@ describe('profile resolution refusals', () => {
       .toThrow(/sets compat "supportsStore", which no wire protocol declares/)
   })
 
+  it('accepts a compat whose every key the wire protocol declares', () => {
+    const compat = { maxTokensField: 'max_tokens', supportsDeveloperRole: true, thinkingFormat: 'openai' } as const
+    const profile = resolve({ deepseek: { compat } }).get('deepseek')
+    expect(profile?.compat).toEqual(compat)
+  })
+
   it('refuses an api the adapter does not serve', () => {
     expect(() => resolve({ deepseek: { api: 'anthropic-messages' } }))
       .toThrow(/names api "anthropic-messages", which this adapter does not serve/)

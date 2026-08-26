@@ -4,15 +4,27 @@
  * configuration change reaches the next request without a restart; model
  * descriptors come from the route catalogs those profiles materialized.
  *
- * The wire runtime itself — one `stream()` call making exactly one
- * `openai-completions` request — is the next change on this package; until
- * it lands, a streaming call fails as a terminal error chunk naming the
- * route and model rather than pretending to serve.
+ * The wire runtime is the harness-owned `openai-completions` dialect: one
+ * `stream()` call makes exactly one provider request — a direct fetch against
+ * the route's resolved `baseURL`, with the SSE response framed by
+ * `eventsource-parser` and translated into harness stream chunks. Failures
+ * classify into stable codes; the configured idle timeout bounds each
+ * outstanding provider read without counting consumer think time.
  *
  * @module dsh-llm-ai/adapter
  */
 
-import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import {
+  attributionHeaders,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  isContextWindowExceededError,
+  isQuotaExceededError,
+  LlmAdapter,
+  LlmError,
+  ProviderRequestId,
+  QUOTA_EXCEEDED_CODE,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -21,14 +33,45 @@ import type {
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { REASONING_LEVELS } from './catalog.ts'
 import type { ReasoningLevel, ResolvedModel } from './catalog.ts'
 import type { ResolvedLlmAiProfile } from './config.ts'
+import { dispatchReasoning, serializeRequest } from './serialize.ts'
+import type { ThinkingDispatch } from './serialize.ts'
+import { parseSse } from './sse.ts'
+import { translate } from './translate.ts'
+import type { WireError } from './types.ts'
 
-/** Constructor options for {@link LlmAiAdapter}: the profile resolution hook the plugin owns. */
+/** A value that may be supplied synchronously or asynchronously. */
+type MaybePromise<T> = T | Promise<T>
+
+/**
+ * Read the referenced environment variable: without the credentials seam the
+ * process environment is the whole credential plane, so the adapter reads
+ * exactly the variable the profile named. An unset or empty variable carries
+ * no credential and sends no header; the seam upgrade replaces this default.
+ * @param profile - the route's resolved profile.
+ * @returns the ambient credential value, or `undefined` when the route authenticates without one.
+ */
+function ambientApiKey(profile: ResolvedLlmAiProfile): string | undefined {
+  if (profile.apiKeyEnv === undefined) return undefined
+  const value = process.env[profile.apiKeyEnv]
+  return value === undefined || value.length === 0 ? undefined : value
+}
+
+/** Constructor options for {@link LlmAiAdapter}: the operation-local hooks the plugin owns. */
 export interface LlmAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
   profiles: () => ReadonlyMap<string, ResolvedLlmAiProfile>
+  /**
+   * Resolve the credential for one route's request. The one resolution point
+   * for the credential plane: today the adapter defaults to the referenced
+   * process environment variable, and the credentials-seam upgrade swaps this
+   * hook for the seam (managed store, launch environment, and the
+   * missing/invalid-credential refusals) without touching the request path.
+   */
+  resolveApiKey?: (profile: ResolvedLlmAiProfile) => MaybePromise<string | undefined>
 }
 
 /** The profile for one route, or the not-owned failure. */
@@ -78,6 +121,50 @@ function reasoningInfo(
         : {},
     },
   }
+}
+
+/** Capability-owned code the idle watchdog stamps onto its timeout reason. */
+const STREAM_IDLE_TIMEOUT_CODE = 'LLM_AI_STREAM_IDLE_TIMEOUT'
+
+/**
+ * Parse a `Retry-After` header value: delta-seconds or an HTTP-date.
+ * @param value - the raw header value, or `null` when absent.
+ * @returns the positive delay in milliseconds, or `undefined` when the value is absent, malformed, or past.
+ */
+function providerRetryAfterMs(value: string | null): number | undefined {
+  if (value === null) return undefined
+  if (/^\d+$/.test(value)) {
+    const delay = Number(value) * 1_000
+    return Number.isFinite(delay) && delay > 0 ? delay : undefined
+  }
+  const delay = Date.parse(value) - Date.now()
+  return Number.isFinite(delay) && delay > 0 ? delay : undefined
+}
+
+/** The provider-issued request id of one response, when it carried one. */
+function requestId(headers: Headers): ReturnType<typeof ProviderRequestId> | undefined {
+  const value = headers.get('x-request-id')
+  return value === null || value.length === 0 ? undefined : ProviderRequestId(value)
+}
+
+/**
+ * Map an HTTP status to a stable LlmError code.
+ * @param status - status of a non-2xx provider response.
+ * @param error - parsed provider error body, when available.
+ * @returns the normalized harness error code.
+ */
+export function httpErrorCode(status: number, error?: WireError['error']): string {
+  if (status === 401 || status === 403) return 'AUTH'
+  if (status === 413) return 'INVALID_REQUEST'
+  const detail = [error?.code, error?.type, error?.message].filter(Boolean).join(' ')
+  if (isQuotaExceededError(detail)) return QUOTA_EXCEEDED_CODE
+  if (status === 429) return 'RATE_LIMIT'
+  if (status === 400) {
+    if (isContextWindowExceededError(detail)) return CONTEXT_WINDOW_EXCEEDED_CODE
+    return 'INVALID_REQUEST'
+  }
+  if (status >= 500) return 'SERVER'
+  return `HTTP_${status}`
 }
 
 /**
@@ -136,14 +223,128 @@ export class LlmAiAdapter extends LlmAdapter {
     })
   }
 
-  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // The openai-completions wire runtime (SSE parsing, chunk translation,
-    // error classification, credential resolution) is the next change on this
-    // package; the skeleton refuses streaming calls rather than pretending.
-    throw new LlmError(
-      `llm-ai: provider "${options.provider}" model "${options.model}" cannot stream: the`
-        + ' openai-completions wire runtime is not implemented yet',
-      'NOT_IMPLEMENTED',
-    )
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // One resolution per stream call: the route profile and the model it
+    // serves freeze here for this whole request, so an in-flight stream never
+    // observes a configuration change and the next call re-resolves.
+    const profiles = this.config.profiles()
+    const profile = profileOf(profiles, options.provider)
+    const model = modelOf(profile, options.model)
+    // Reasoning dispatch refuses an unselectable level before any network
+    // I/O, naming the route and model.
+    const thinking = dispatchReasoning(profile, model, options.reasoningEffort)
+    const apiKey = await (this.config.resolveApiKey ?? ambientApiKey)(profile)
+    const consumer = new AbortController()
+    const upstream = options.signal === undefined
+      ? consumer.signal
+      : AbortSignal.any([options.signal, consumer.signal])
+    using watchdog = idleWatchdog(upstream, profile.streamIdleTimeoutMs, STREAM_IDLE_TIMEOUT_CODE)
+    const iterator = this.request(
+      options,
+      profile,
+      model,
+      thinking,
+      apiKey,
+      watchdog.signal,
+      () => { watchdog.pulse() },
+    )[Symbol.asyncIterator]()
+    let exhausted = false
+    try {
+      while (true) {
+        const result = await watchdog.next(iterator)
+        if (result.done) {
+          exhausted = true
+          return
+        }
+        yield result.value
+      }
+    } catch (error: unknown) {
+      if (timeoutOf(watchdog.signal, STREAM_IDLE_TIMEOUT_CODE) !== undefined) {
+        throw new LlmError(
+          `llm-ai: provider "${profile.provider}" stream idle timeout after ${profile.streamIdleTimeoutMs}ms`,
+          'TIMEOUT',
+          { cause: error },
+        )
+      }
+      if (options.signal?.aborted) {
+        throw new LlmError(`llm-ai: provider "${profile.provider}" request aborted by caller`, 'ABORTED', { cause: error })
+      }
+      if (error instanceof LlmError) throw error
+      throw new LlmError(
+        `llm-ai: provider "${profile.provider}" stream from ${model.baseURL} failed`,
+        'TRANSPORT',
+        { cause: error },
+      )
+    } finally {
+      consumer.abort('llm-ai stream consumer stopped')
+      // Prompt teardown of a suspended request generator; the aborted signal
+      // already owns the transport, so this return only runs generator
+      // cleanup (the stream-iterator machinery swallows cancel rejections).
+      if (!exhausted && iterator.return !== undefined) {
+        await iterator.return()
+      }
+    }
+  }
+
+  /**
+   * The one provider request of one stream call, as a chunk iterator: fetch,
+   * status classification, and SSE translation. Transport teardown observes
+   * `signal`, which fuses the caller's abort with the idle watchdog.
+   */
+  private async * request(
+    options: GenerateOptions,
+    profile: ResolvedLlmAiProfile,
+    model: ResolvedModel,
+    thinking: ThinkingDispatch,
+    apiKey: string | undefined,
+    signal: AbortSignal,
+    onComment: () => void,
+  ): AsyncIterable<StreamChunk> {
+    const url = `${model.baseURL}/chat/completions`
+    const body = JSON.stringify(serializeRequest(options, profile, model, thinking))
+    const headers = {
+      ...profile.headers,
+      ...attributionHeaders(),
+      ...apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` },
+      'content-type': 'application/json',
+      'accept': 'text/event-stream',
+    }
+
+    let response: Response
+    try {
+      response = await fetch(url, { method: 'POST', headers, body, signal })
+    } catch (error: unknown) {
+      // The outer stream distinguishes caller cancellation and watchdog expiry.
+      if (signal.aborted) throw error
+      // fetch wraps every transport failure (DNS, refused connection, TLS,
+      // proxy) in a bare `TypeError: fetch failed` whose actionable detail
+      // lives on `cause`. Wrapping with the endpoint and chaining the cause
+      // lets `errorChain` render the full diagnosis at every reporting boundary.
+      throw new LlmError(`llm-ai: provider "${profile.provider}" request to ${url} failed`, 'TRANSPORT', { cause: error })
+    }
+
+    if (!response.ok) {
+      let message = `llm-ai: provider "${profile.provider}" HTTP ${response.status}`
+      let providerError: WireError['error']
+      try {
+        providerError = (await response.json() as WireError).error
+      } catch (_malformedErrorBody) {
+        // Only error-body JSON parsing lands here: the HTTP status still
+        // identifies the failure, so a malformed gateway body must not mask it.
+      }
+      if (providerError?.message) message = providerError.message
+      const delay = providerRetryAfterMs(response.headers.get('retry-after'))
+      const id = requestId(response.headers)
+      throw new LlmError(message, httpErrorCode(response.status, providerError), {
+        status: response.status,
+        ...delay === undefined ? {} : { providerRetryAfterMs: delay },
+        ...id === undefined ? {} : { requestId: id },
+      })
+    }
+    if (!response.body) {
+      throw new LlmError(`llm-ai: provider "${profile.provider}" returned no response body`, 'EMPTY_RESPONSE')
+    }
+
+    yield* translate(parseSse(response.body, onComment))
   }
 }

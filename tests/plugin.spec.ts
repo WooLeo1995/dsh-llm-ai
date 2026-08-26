@@ -3,7 +3,6 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import * as LlmAi from '../src/index.ts'
@@ -71,13 +70,6 @@ async function settingsHarness(config: LlmAi.Config = {}): Promise<Context> {
     ...config,
   })
   return ctx
-}
-
-/** Collect every chunk of one streamed call. */
-async function chunks(ctx: Context, options: GenerateOptions): Promise<StreamChunk[]> {
-  const collected: StreamChunk[] = []
-  for await (const chunk of ctx.llm.stream(options)) collected.push(chunk)
-  return collected
 }
 
 describe('dormant mounting', () => {
@@ -540,21 +532,6 @@ describe('registration semantics', () => {
       vi.unstubAllEnvs()
       vi.unstubAllGlobals()
     }
-  })
-})
-
-describe('streaming stub', () => {
-  it('refuses streaming calls as a terminal error chunk naming the runtime gap', async () => {
-    const { ctx } = await harness({ providers: { deepseek: {} } })
-    const collected = await chunks(ctx, {
-      provider: 'deepseek',
-      model: 'deepseek-chat',
-      messages: [],
-    })
-    expect(collected).toEqual([{
-      type: 'finish',
-      reason: { kind: 'error', failure: expect.objectContaining({ code: 'NOT_IMPLEMENTED' }) },
-    }])
   })
 })
 
