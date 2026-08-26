@@ -20,7 +20,14 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { ModelModality, ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { COMPAT_FIELDS, MODALITIES, REASONING_LEVELS, resolveRouteModels } from './catalog.ts'
+import {
+  assertOwnedCompatFields,
+  MAX_TOKENS_FIELDS,
+  MODALITIES,
+  REASONING_LEVELS,
+  resolveRouteModels,
+  THINKING_FORMATS,
+} from './catalog.ts'
 import type { CompatProfile, ModelOverride, ModelProfile, ReasoningEfforts, ReasoningLevel, ResolvedModel } from './catalog.ts'
 import { supportedProtocols } from './provider.ts'
 import type { RegistryCatalog } from './modelsdev.ts'
@@ -84,8 +91,8 @@ export interface LlmAiProviderProfile {
   modelOverrides?: Record<string, ModelOverride>
   /**
    * Wire-compatibility switches defaulting every model on this route; each
-   * model's own `compat` overrides per field. Activation and resolution
-   * ordering land with the wire runtime.
+   * model's own `compat` overrides per field, and unset fields fall through
+   * to the protocol default.
    */
   compat?: CompatProfile
   /**
@@ -136,7 +143,7 @@ export interface ResolvedLlmAiProfile {
   api: string
   /** Endpoint override, when the profile stated one; otherwise the registry's. */
   baseURL?: string
-  /** Deployment-declared compat switches, when any; activation lands with the wire runtime. */
+  /** Route-default compat switches; each model's own `compat` wins per field. */
   compat?: CompatProfile
   /** Provider request headers, detached. */
   headers?: Record<string, string>
@@ -191,9 +198,9 @@ const reasoningEfforts = z.dict(
 ) as unknown as z<ReasoningEfforts>
 
 const compatProfile: z<CompatProfile> = z.object({
-  maxTokensField: z.union(['max_completion_tokens', 'max_tokens']),
+  maxTokensField: z.union([...MAX_TOKENS_FIELDS]),
   supportsDeveloperRole: z.boolean(),
-  thinkingFormat: z.union(['openai', 'deepseek', 'openrouter']),
+  thinkingFormat: z.union([...THINKING_FORMATS]),
 })
 
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
@@ -247,24 +254,6 @@ export const Config: z<Config> = z.object({
 })
 
 /**
- * Reject a compat key the owned surface does not declare. Runs on the route
- * profile because schemastery passes unknown object keys through, so a
- * misspelled or not-yet-owned switch would otherwise ride the resolved
- * profile looking applied. Valueless keys and per-model rules land with the
- * compat activation work.
- */
-function assertOwnedCompatFields(provider: string, compat: CompatProfile | undefined): void {
-  for (const field of Object.keys(compat ?? {})) {
-    if (!(COMPAT_FIELDS as readonly string[]).includes(field)) {
-      throw new Error(
-        `llm-ai: provider "${provider}" sets compat "${field}", which no wire protocol declares; the`
-        + ` configurable switches are ${COMPAT_FIELDS.join(', ')}`,
-      )
-    }
-  }
-}
-
-/**
  * Validate profiles against the loaded registry and return a detached
  * route-keyed map suitable for per-request reads. This is the one explicit
  * resolve step, so an omitted dict resolves to the empty (dormant) route set
@@ -315,7 +304,7 @@ export function resolveProfiles(
     // always shown route keys, and a registry route must not silently rename
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
-    assertOwnedCompatFields(provider, source.compat)
+    assertOwnedCompatFields(provider, 'route', source.compat)
     // The schema's union refuses this on the settings path; the raw entry
     // config skips the schema, so the same refusal stands here: a route
     // naming a protocol this build cannot serve must fail where it is written.

@@ -819,6 +819,178 @@ describe('reasoning dispatch', () => {
   })
 })
 
+describe('compat switches', () => {
+  // models.dev records no wire-dialect facts of its own, so resolution is
+  // model → route → protocol default; the registry-inference layer of the
+  // pi-ai lineage has nothing to read in this catalog.
+
+  it('applies route-level switches to every model on the route that reads them', async () => {
+    const { ctx, server } = await wireHarness(
+      [{ kind: 'sse', events: textEvents }, { kind: 'sse', events: textEvents }],
+      url => route(url, { compat: { maxTokensField: 'max_tokens', supportsDeveloperRole: true } }),
+    )
+
+    await chunksOf(ctx, { ...call, system: 'be brief', maxTokens: 64 })
+    expect(server.requests[0]).toMatchObject({
+      messages: [{ role: 'developer', content: 'be brief' }, { role: 'user', content: 'hi' }],
+      max_tokens: 64,
+    })
+    expect(server.requests[0]).not.toHaveProperty('max_completion_tokens')
+
+    await chunksOf(ctx, { ...call, model: 'deepseek-reasoner', system: 'be brief', maxTokens: 32 })
+    expect(server.requests[1]).toMatchObject({
+      messages: [{ role: 'developer', content: 'be brief' }, { role: 'user', content: 'hi' }],
+      max_tokens: 32,
+    })
+    expect(server.requests[1]).not.toHaveProperty('max_completion_tokens')
+  })
+
+  it('resolves each field independently: model compat over route compat over protocol default', async () => {
+    const { ctx, server } = await wireHarness(
+      [{ kind: 'sse', events: textEvents }, { kind: 'sse', events: textEvents }],
+      url => route(url, {
+        compat: { maxTokensField: 'max_tokens', supportsDeveloperRole: true, thinkingFormat: 'openai' },
+        models: [
+          // The model restates the protocol defaults over the route's
+          // switches: a per-field winner, never all-or-nothing.
+          { id: 'deepseek-chat', compat: { maxTokensField: 'max_completion_tokens', supportsDeveloperRole: false } },
+          // No compat of its own: every route switch applies.
+          { id: 'deepseek-reasoner' },
+        ],
+      }),
+    )
+
+    await chunksOf(ctx, { ...call, system: 'be brief', maxTokens: 64 })
+    expect(server.requests[0]).toMatchObject({
+      messages: [{ role: 'system', content: 'be brief' }, { role: 'user', content: 'hi' }],
+      max_completion_tokens: 64,
+    })
+    expect(server.requests[0]).not.toHaveProperty('max_tokens')
+
+    await chunksOf(ctx, {
+      ...call,
+      model: 'deepseek-reasoner',
+      system: 'be brief',
+      maxTokens: 64,
+      reasoningEffort: ReasoningEffortId('low'),
+    })
+    expect(server.requests[1]).toMatchObject({
+      messages: [{ role: 'developer', content: 'be brief' }, { role: 'user', content: 'hi' }],
+      max_tokens: 64,
+      // The route's thinkingFormat reached a model that set none of its own.
+      reasoning_effort: 'low',
+    })
+    expect(server.requests[1]).not.toHaveProperty('thinking')
+  })
+
+  it('keeps the protocol defaults when no layer states a field', async () => {
+    const { ctx, server } = await wireHarness([{ kind: 'sse', events: textEvents }])
+
+    await chunksOf(ctx, {
+      ...call,
+      model: 'deepseek-reasoner',
+      system: 'be brief',
+      maxTokens: 64,
+      reasoningEffort: ReasoningEffortId('low'),
+    })
+    expect(server.requests[0]).toMatchObject({
+      messages: [{ role: 'system', content: 'be brief' }, { role: 'user', content: 'hi' }],
+      max_completion_tokens: 64,
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'low',
+    })
+  })
+
+  it('serializes the openai thinking format as the bare effort, with valueless off sending nothing', async () => {
+    const { ctx, server } = await wireHarness(
+      [
+        { kind: 'sse', events: textEvents },
+        { kind: 'sse', events: textEvents },
+        { kind: 'sse', events: textEvents },
+      ],
+      url => route(url, {
+        models: [{
+          id: 'deepseek-chat',
+          reasoningEfforts: { off: null, high: 'ultra' },
+          compat: { thinkingFormat: 'openai' },
+        }],
+      }),
+    )
+
+    await chunksOf(ctx, { ...call, reasoningEffort: ReasoningEffortId('high') })
+    expect(server.requests[0]).toMatchObject({ reasoning_effort: 'ultra' })
+    expect(server.requests[0]).not.toHaveProperty('thinking')
+    expect(server.requests[0]).not.toHaveProperty('reasoning')
+
+    await chunksOf(ctx, { ...call, reasoningEffort: ReasoningEffortId('off') })
+    expect(server.requests[1]).not.toHaveProperty('thinking')
+    expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
+    expect(server.requests[1]).not.toHaveProperty('reasoning')
+
+    await chunksOf(ctx, call)
+    expect(server.requests[2]).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('serializes the openrouter thinking format as the nested reasoning object, omitting it for valueless off', async () => {
+    const { ctx, server } = await wireHarness(
+      [
+        { kind: 'sse', events: textEvents },
+        { kind: 'sse', events: textEvents },
+        { kind: 'sse', events: textEvents },
+        { kind: 'sse', events: textEvents },
+      ],
+      url => route(url, {
+        compat: { thinkingFormat: 'openrouter' },
+        models: [
+          { id: 'deepseek-chat', reasoningEfforts: { off: null, high: 'ultra' } },
+          { id: 'deepseek-reasoner', reasoningEfforts: { off: 'none', high: 'high' } },
+        ],
+      }),
+    )
+
+    await chunksOf(ctx, { ...call, reasoningEffort: ReasoningEffortId('high') })
+    expect(server.requests[0]).toMatchObject({ reasoning: { effort: 'ultra' } })
+    expect(server.requests[0]).not.toHaveProperty('thinking')
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+
+    // A valueless off is the object's absence.
+    await chunksOf(ctx, { ...call, reasoningEffort: ReasoningEffortId('off') })
+    expect(server.requests[1]).not.toHaveProperty('reasoning')
+    expect(server.requests[1]).not.toHaveProperty('thinking')
+
+    // Nothing dispatched: the same wire shape as a valueless off.
+    await chunksOf(ctx, call)
+    expect(server.requests[2]).not.toHaveProperty('reasoning')
+
+    // A valued off carries its spelling into the object.
+    await chunksOf(ctx, { ...call, model: 'deepseek-reasoner', reasoningEffort: ReasoningEffortId('off') })
+    expect(server.requests[3]).toMatchObject({ reasoning: { effort: 'none' } })
+  })
+
+  it('threads the resolved dialect through the image serialization path', async () => {
+    const { ctx, server, store } = await visionHarness(
+      [{ kind: 'sse', events: textEvents }],
+      url => route(url, { compat: { supportsDeveloperRole: true, maxTokensField: 'max_tokens' } }),
+    )
+    store.images.set(String(IMAGE_PNG_A.attachmentId), Uint8Array.of(1, 2, 3))
+
+    await chunksOf(ctx, {
+      ...visionCall,
+      system: 'be brief',
+      maxTokens: 32,
+      messages: [imageMessage([imageBlock(IMAGE_PNG_A)])],
+    })
+    expect(server.requests[0]).toMatchObject({
+      messages: [
+        { role: 'developer', content: 'be brief' },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } }] },
+      ],
+      max_tokens: 32,
+    })
+    expect(server.requests[0]).not.toHaveProperty('max_completion_tokens')
+  })
+})
+
 describe('error classification', () => {
   it('classifies authentication failures', async () => {
     const { ctx } = await wireHarness([

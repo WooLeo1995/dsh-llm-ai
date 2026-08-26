@@ -63,26 +63,93 @@ export type ReasoningLevel = keyof typeof REASONING_LEVEL_GATE
 export type ReasoningEfforts = Partial<Record<ReasoningLevel, string | null>>
 
 /**
+ * Every output-cap field spelling an OpenAI-compatible endpoint may read. The
+ * `Record` key type is the single authority for the schema union,
+ * {@link CompatProfile}, and the wire dialect, so a spelling added here
+ * reaches every surface at once.
+ */
+const MAX_TOKENS_FIELD_GATE: Record<'max_completion_tokens' | 'max_tokens', true> = {
+  max_completion_tokens: true,
+  max_tokens: true,
+}
+
+/** Every output-cap field spelling a compat profile may name, for the schema union. */
+export const MAX_TOKENS_FIELDS = Object.keys(MAX_TOKENS_FIELD_GATE) as readonly (keyof typeof MAX_TOKENS_FIELD_GATE)[]
+
+/** One output-cap field spelling an OpenAI-compatible endpoint may read. */
+export type MaxTokensField = keyof typeof MAX_TOKENS_FIELD_GATE
+
+/**
+ * Every reasoning-parameter dialect a request may serialize thinking under.
+ * The `Record` key type is the single authority for the schema union,
+ * {@link CompatProfile}, and the wire dialect, the same role the other gates
+ * in this module play.
+ */
+const THINKING_FORMAT_GATE: Record<'openai' | 'deepseek' | 'openrouter', true> = {
+  openai: true,
+  deepseek: true,
+  openrouter: true,
+}
+
+/** Every reasoning dialect a compat profile may name, for the schema union. */
+export const THINKING_FORMATS = Object.keys(THINKING_FORMAT_GATE) as readonly (keyof typeof THINKING_FORMAT_GATE)[]
+
+/** One reasoning-parameter dialect a request may serialize thinking under. */
+export type ThinkingFormat = keyof typeof THINKING_FORMAT_GATE
+
+/**
  * Wire-compatibility switches for OpenAI-compatible gateways whose URLs say
- * nothing about their dialects. Declared here and carried on resolved
- * profiles; their request-shape activation and resolution ordering
- * (model → route → registry inference → protocol default) land with the wire
- * runtime. `maxTokensField` names the output-cap field the endpoint reads,
+ * nothing about their dialects. Resolution runs per field from a model entry
+ * over its route's profile to the protocol default; models.dev records no
+ * wire-dialect facts, so no registry layer sits in that chain.
+ * `maxTokensField` names the output-cap field the endpoint reads,
  * `supportsDeveloperRole` whether it accepts the `developer` role for the
  * system prompt, and `thinkingFormat` the reasoning-parameter dialect it
  * expects.
  */
 export interface CompatProfile {
   /** Which output-cap field the endpoint reads. */
-  maxTokensField?: 'max_completion_tokens' | 'max_tokens'
+  maxTokensField?: MaxTokensField
   /** Whether the endpoint accepts the `developer` role for the system prompt. */
   supportsDeveloperRole?: boolean
   /** Reasoning-parameter dialect the endpoint expects. */
-  thinkingFormat?: 'openai' | 'deepseek' | 'openrouter'
+  thinkingFormat?: ThinkingFormat
 }
 
 /** Every compat field a profile may set, for the schema union and diagnostics. */
 export const COMPAT_FIELDS = ['maxTokensField', 'supportsDeveloperRole', 'thinkingFormat'] as const
+
+/**
+ * Reject a compat key the owned surface does not declare, and one written
+ * with no value at all. schemastery passes unknown object keys and nullable
+ * values through, so a misspelled or pi-ai-era switch (`supportsTemperature`,
+ * `openRouterRouting`) and a valueless `compat:` key would otherwise ride the
+ * resolved profile looking applied — the silent drop this surface refuses
+ * everywhere else. The diagnostic names the site and lists the offered set,
+ * so a porter of an old configuration sees what IS offered instead of hunting
+ * a key that never applied.
+ * @param provider - provider route key, for the diagnostic.
+ * @param site - the configuration site, for the diagnostic (`route` or `model "<id>"`).
+ * @param compat - the configured switches, when any.
+ */
+export function assertOwnedCompatFields(provider: string, site: string, compat: CompatProfile | undefined): void {
+  for (const [field, value] of Object.entries(compat ?? {})) {
+    // The name is judged before the value, so a misspelled key written bare
+    // is refused for being that name rather than for being empty.
+    if (!(COMPAT_FIELDS as readonly string[]).includes(field)) {
+      invalid(provider, `${site} sets compat "${field}", which no wire protocol declares; the configurable`
+        + ` switches are ${COMPAT_FIELDS.join(', ')}`)
+    }
+    // A valueless key (`maxTokensField:`) survives schemastery, which passes
+    // nullable data through before any member schema runs. Carrying it forward
+    // would write nothing over the next layer's answer, leaving the switch
+    // written but not applied.
+    if (value == null) {
+      invalid(provider, `${site} sets compat "${field}" with no value; give it one, or remove the key to`
+        + ' leave the field to the next layer in the model → route → protocol-default chain')
+    }
+  }
+}
 
 /** One configured model entry: an id plus the registry fields it overrides. */
 export interface ModelProfile {
@@ -146,9 +213,15 @@ export interface ResolvedModel {
   maxTokens: number | undefined
   /**
    * Selectable reasoning efforts by level; empty means the model does not
-   * reason. Wire activation of the spellings lands with the wire runtime.
+   * reason.
    */
   reasoningEfforts: ReadonlyMap<ReasoningLevel, string | null>
+  /**
+   * Wire-compatibility switches the model's own entry declared, when any.
+   * Each field wins over the route profile's; unset fields fall through to
+   * the route, then the protocol default.
+   */
+  compat?: CompatProfile
 }
 
 /** The route-level facts model materialization reads. */
@@ -314,6 +387,7 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
     if (entry.id.length === 0) invalid(provider, 'has a model with an empty id')
     if (seen.has(entry.id)) invalid(provider, `lists model "${entry.id}" more than once`)
     seen.add(entry.id)
+    assertOwnedCompatFields(provider, `model "${entry.id}"`, entry.compat)
     const base = defaults.get(entry.id)
     if (baseURL === undefined) {
       invalid(provider, `model "${entry.id}" needs a baseURL; the registry does not describe this route's`
@@ -347,6 +421,7 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
       contextWindow,
       maxTokens,
       reasoningEfforts: resolveModelReasoning(provider, entry, base),
+      ...entry.compat === undefined ? {} : { compat: { ...entry.compat } },
     }
     return model
   })

@@ -3,6 +3,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { catalogFromSnapshot } from '../src/modelsdev.ts'
 import { Config, resolveProfiles } from '../src/config.ts'
 import type { LlmAiProviderProfile } from '../src/config.ts'
+import type { CompatProfile } from '../src/catalog.ts'
 import { fixtureRegistry } from './registry.ts'
 
 const catalog = catalogFromSnapshot(fixtureRegistry())
@@ -64,7 +65,41 @@ describe('profile resolution refusals', () => {
       .toThrow(/sets compat "supportsStore", which no wire protocol declares/)
   })
 
+  it('refuses pi-ai-era switch names, listing the offered set for the porter of an old config', () => {
+    expect(() => resolve({ deepseek: { compat: { supportsTemperature: false } as never } }))
+      .toThrow(/route sets compat "supportsTemperature", which no wire protocol declares; the configurable/)
+    expect(() => resolve({ deepseek: { compat: { openRouterRouting: {} } as never } }))
+      .toThrow(/route sets compat "openRouterRouting", which no wire protocol declares/)
+  })
+
+  it('refuses a compat key written with no value', () => {
+    // schemastery passes null through before any member schema runs, so a
+    // valueless `compat:` key reaches resolution intact and is refused here
+    // rather than silently shadowing nothing.
+    expect(() => resolve({ deepseek: { compat: { maxTokensField: null } as never } }))
+      .toThrow(/route sets compat "maxTokensField" with no value/)
+  })
+
+  it('refuses an unknown compat key on a models entry, naming route and model', () => {
+    expect(() => resolve({
+      deepseek: { models: [{ id: 'deepseek-chat', compat: { supportsStore: true } as never }] },
+    })).toThrow(/model "deepseek-chat" sets compat "supportsStore", which no wire protocol declares/)
+  })
+
+  it('refuses an unknown or valueless compat key on a modelOverrides entry, naming route and model', () => {
+    expect(() => resolve({
+      deepseek: { modelOverrides: { 'deepseek-reasoner': { compat: { openRouterRouting: {} } as never } } },
+    })).toThrow(/model "deepseek-reasoner" sets compat "openRouterRouting"/)
+    expect(() => resolve({
+      deepseek: { modelOverrides: { 'deepseek-reasoner': { compat: { thinkingFormat: null } as never } } },
+    })).toThrow(/model "deepseek-reasoner" sets compat "thinkingFormat" with no value/)
+  })
+
   it('accepts a compat whose every key the wire protocol declares', () => {
+    // v1 serves one protocol that reads every owned key, so "a model-level
+    // key combination the single protocol cannot read" has no case of its own
+    // beyond the unknown-key refusals above; the class becomes real when a
+    // second protocol arrives and splits what is readable where.
     const compat = { maxTokensField: 'max_tokens', supportsDeveloperRole: true, thinkingFormat: 'openai' } as const
     const profile = resolve({ deepseek: { compat } }).get('deepseek')
     expect(profile?.compat).toEqual(compat)
@@ -127,5 +162,15 @@ describe('profile resolution results', () => {
     }).get('visionai')
     const inputs = profile?.models.map(model => [...model.input])
     expect(inputs).toEqual([['text'], ['text'], ['text']])
+  })
+
+  it("carries a model entry's compat onto the resolved model, detached", () => {
+    const compat: CompatProfile = { maxTokensField: 'max_tokens' }
+    const profile = resolve({
+      deepseek: { models: [{ id: 'deepseek-chat', compat }, { id: 'deepseek-reasoner' }] },
+    }).get('deepseek')
+    compat.maxTokensField = 'max_completion_tokens'
+    expect(profile?.models[0]?.compat).toEqual({ maxTokensField: 'max_tokens' })
+    expect(profile?.models[1]?.compat).toBeUndefined()
   })
 })

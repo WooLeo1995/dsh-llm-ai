@@ -13,7 +13,7 @@ import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-ll
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { REASONING_LEVELS } from './catalog.ts'
-import type { ReasoningLevel, ResolvedModel } from './catalog.ts'
+import type { CompatProfile, MaxTokensField, ReasoningLevel, ResolvedModel, ThinkingFormat } from './catalog.ts'
 import type { ResolvedLlmAiProfile } from './config.ts'
 import type {
   WireImageContentPart,
@@ -24,25 +24,53 @@ import type {
 } from './types.ts'
 
 /**
- * The request-shape choices a wire dialect makes. The protocol default is
- * fixed today; the compat-switch activation work resolves a dialect per
- * request (model → route → registry inference → protocol default) and hands
- * it to {@link serializeRequest} through the `dialect` parameter, which is
- * the single seam it plugs into. The thinking serialization keeps its own
- * seam: {@link serializeThinking} owns the protocol-default spelling and
- * grows the `thinkingFormat` split there.
+ * The request-shape choices a wire dialect makes. {@link resolveDialect}
+ * computes one per request — the model entry's compat over the route's over
+ * {@link PROTOCOL_DEFAULT_DIALECT}, per field — and the adapter hands it to
+ * both serializer entry points, {@link serializeRequest} and
+ * {@link serializeRequestWithImages}, through their trailing `dialect`
+ * parameter, the single seam compat activation plugs into. The thinking
+ * serialization keeps its own seam: {@link serializeThinking} splits on
+ * `thinkingFormat`.
  */
 export interface WireDialect {
   /** Role the system slot is sent under; the protocol default is `system`. */
   systemRole: 'system' | 'developer'
-  /** Output-cap field the endpoint reads; the modern baseline is `max_completion_tokens`. */
-  maxTokensField: 'max_completion_tokens' | 'max_tokens'
+  /** Output-cap field the endpoint reads; the protocol default is `max_completion_tokens`. */
+  maxTokensField: MaxTokensField
+  /** Reasoning-parameter dialect; the protocol default is `deepseek`. */
+  thinkingFormat: ThinkingFormat
 }
 
-/** The `openai-completions` protocol defaults, used until compat activation resolves a dialect. */
+/** The `openai-completions` protocol defaults: modern baseline fields, DeepSeek thinking dialect. */
 export const PROTOCOL_DEFAULT_DIALECT: WireDialect = {
   systemRole: 'system',
   maxTokensField: 'max_completion_tokens',
+  thinkingFormat: 'deepseek',
+}
+
+/**
+ * Resolve the wire dialect one request serializes under, per field: the model
+ * entry's compat wins, then the route profile's, then the protocol default.
+ * models.dev records no wire-dialect facts of its own, so no registry layer
+ * sits between route and default to consult, and there is no spelling for
+ * handing a field back short of restating its value.
+ * @param model - the resolved model the request addresses.
+ * @param routeCompat - the route profile's compat switches, when any.
+ * @returns the dialect both serializer entry points read.
+ */
+export function resolveDialect(
+  model: Pick<ResolvedModel, 'compat'>,
+  routeCompat: CompatProfile | undefined,
+): WireDialect {
+  const supportsDeveloperRole = model.compat?.supportsDeveloperRole ?? routeCompat?.supportsDeveloperRole
+  return {
+    systemRole: supportsDeveloperRole === true ? 'developer' : 'system',
+    maxTokensField: model.compat?.maxTokensField ?? routeCompat?.maxTokensField
+      ?? PROTOCOL_DEFAULT_DIALECT.maxTokensField,
+    thinkingFormat: model.compat?.thinkingFormat ?? routeCompat?.thinkingFormat
+      ?? PROTOCOL_DEFAULT_DIALECT.thinkingFormat,
+  }
 }
 
 /** One dispatched reasoning selection, already resolved to its wire facts. */
@@ -96,18 +124,39 @@ export function dispatchReasoning(
 }
 
 /**
- * Serialize one dispatch into request fields under the protocol's default
- * reasoning dialect: a valued level sends the enabled spelling beside its
- * effort, the valueless `off` sends only the disabled spelling, and nothing
- * dispatched sends nothing at all.
+ * Serialize one dispatch into request fields under the named reasoning
+ * dialect. The DeepSeek dialect toggles with a `thinking` object beside its
+ * effort; the OpenAI dialect sends the effort alone and represents a valueless
+ * `off` as the parameter's absence; the OpenRouter dialect nests the effort in
+ * a `reasoning` object and likewise omits it entirely for a valueless `off`.
  * @param dispatch - the resolved reasoning dispatch.
- * @returns the request fields for it; empty when no reasoning was dispatched.
+ * @param format - the reasoning dialect the resolved wire dialect named.
+ * @returns the request fields for it; empty when the dialect sends nothing for the dispatch.
  */
-export function serializeThinking(dispatch: ThinkingDispatch): Pick<Partial<WireRequest>, 'thinking' | 'reasoning_effort'> {
-  switch (dispatch.state) {
-    case 'none': return {}
-    case 'disabled': return { thinking: { type: 'disabled' } }
-    case 'enabled': return { thinking: { type: 'enabled' }, reasoning_effort: dispatch.effort }
+export function serializeThinking(
+  dispatch: ThinkingDispatch,
+  format: ThinkingFormat,
+): Pick<Partial<WireRequest>, 'thinking' | 'reasoning_effort' | 'reasoning'> {
+  switch (format) {
+    case 'deepseek':
+      switch (dispatch.state) {
+        case 'none': return {}
+        case 'disabled': return { thinking: { type: 'disabled' } }
+        case 'enabled': return { thinking: { type: 'enabled' }, reasoning_effort: dispatch.effort }
+      }
+    case 'openai':
+      switch (dispatch.state) {
+        case 'none': return {}
+        // For most endpoints not thinking is the parameter's absence.
+        case 'disabled': return {}
+        case 'enabled': return { reasoning_effort: dispatch.effort }
+      }
+    case 'openrouter':
+      switch (dispatch.state) {
+        case 'none': return {}
+        case 'disabled': return {}
+        case 'enabled': return { reasoning: { effort: dispatch.effort } }
+      }
   }
 }
 
@@ -393,7 +442,7 @@ function requestWithMessages(
     messages,
     stream: true,
     stream_options: { include_usage: true },
-    ...serializeThinking(thinking),
+    ...serializeThinking(thinking, dialect.thinkingFormat),
     ...tools !== undefined && tools.length > 0 ? { tools } : {},
     ...options.temperature !== undefined ? { temperature: options.temperature } : {},
     ...options.maxTokens === undefined ? {} : { [dialect.maxTokensField]: options.maxTokens },
@@ -409,7 +458,7 @@ function requestWithMessages(
  * @param profile - the route's resolved profile, for refusal naming.
  * @param model - the resolved model the request addresses.
  * @param thinking - the dispatched reasoning selection.
- * @param dialect - the wire dialect; defaults to the protocol defaults until compat activation resolves one.
+ * @param dialect - the resolved wire dialect; the protocol defaults apply when omitted.
  * @returns the chat-completions request body.
  */
 export function serializeRequest(
@@ -438,7 +487,7 @@ export function serializeRequest(
  * @param model - the resolved model the request addresses, for refusal naming.
  * @param thinking - the dispatched reasoning selection.
  * @param images - attachment resolver, request bound, and cancellation.
- * @param dialect - the wire dialect; defaults to the protocol defaults until compat activation resolves one.
+ * @param dialect - the resolved wire dialect; the protocol defaults apply when omitted.
  * @returns the fully materialized chat-completions request body.
  */
 export async function serializeRequestWithImages(

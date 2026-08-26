@@ -13,10 +13,12 @@ export interface WireRequest {
   messages: WireMessage[]
   stream: true
   stream_options: { include_usage: true }
-  /** Thinking-mode toggle of the protocol's default reasoning dialect. */
+  /** Thinking-mode toggle of the DeepSeek reasoning dialect. */
   thinking?: { type: 'enabled' | 'disabled' }
-  /** Wire spelling of the selected reasoning level. */
+  /** Wire spelling of the selected reasoning level (DeepSeek and OpenAI dialects). */
   reasoning_effort?: string
+  /** Nested reasoning selection of the OpenRouter dialect. */
+  reasoning?: { effort: string }
   tools?: WireTool[]
   temperature?: number
   /** Output cap, on the field the resolved dialect names. */

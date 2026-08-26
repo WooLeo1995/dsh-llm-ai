@@ -42,8 +42,8 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { REASONING_LEVELS } from './catalog.ts'
 import type { ReasoningLevel, ResolvedModel } from './catalog.ts'
 import type { ResolvedLlmAiProfile } from './config.ts'
-import { dispatchReasoning, serializeRequest, serializeRequestWithImages } from './serialize.ts'
-import type { ThinkingDispatch } from './serialize.ts'
+import { dispatchReasoning, resolveDialect, serializeRequest, serializeRequestWithImages } from './serialize.ts'
+import type { ThinkingDispatch, WireDialect } from './serialize.ts'
 import { parseSse } from './sse.ts'
 import { translate } from './translate.ts'
 import type { WireError } from './types.ts'
@@ -247,6 +247,9 @@ export class LlmAiAdapter extends LlmAdapter {
     // Reasoning dispatch refuses an unselectable level before any network
     // I/O, naming the route and model.
     const thinking = dispatchReasoning(profile, model, options.reasoningEffort)
+    // Compat resolution runs beside it, per field: the model entry's switches
+    // win over the route profile's, then the protocol defaults answer.
+    const dialect = resolveDialect(model, profile.compat)
     // Image gate, still before any credential, attachment, or network I/O: a
     // model whose resolved modalities omit image refuses the input outright,
     // and an image-capable model needs the attachments seam on this call.
@@ -276,6 +279,7 @@ export class LlmAiAdapter extends LlmAdapter {
       profile,
       model,
       thinking,
+      dialect,
       apiKey,
       attachments,
       watchdog.signal,
@@ -330,6 +334,7 @@ export class LlmAiAdapter extends LlmAdapter {
     profile: ResolvedLlmAiProfile,
     model: ResolvedModel,
     thinking: ThinkingDispatch,
+    dialect: WireDialect,
     apiKey: string | undefined,
     attachments: AttachmentStore | undefined,
     signal: AbortSignal,
@@ -337,12 +342,12 @@ export class LlmAiAdapter extends LlmAdapter {
   ): AsyncIterable<StreamChunk> {
     const url = `${model.baseURL}/chat/completions`
     const body = JSON.stringify(attachments === undefined
-      ? serializeRequest(options, profile, model, thinking)
+      ? serializeRequest(options, profile, model, thinking, dialect)
       : await serializeRequestWithImages(options, profile, model, thinking, {
         attachments,
         maxRequestImageBytes: profile.maxRequestImageBytes,
         signal,
-      }))
+      }, dialect))
     const headers = {
       ...profile.headers,
       ...attributionHeaders(),
