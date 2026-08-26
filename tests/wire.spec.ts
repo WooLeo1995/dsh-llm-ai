@@ -326,6 +326,7 @@ async function attachmentHarness(
   const server = await mockServer(script)
   const registry = await registryServer(fixtureRegistry())
   cleanups.push(registry.close)
+  vi.stubEnv('WIRE_KEY', 'wire-secret')
   const ctx = new Context()
   cleanups.push(async () => {
     await ctx.fiber.dispose()
@@ -1156,7 +1157,10 @@ describe('abort and idle timeout', () => {
         streamIdleTimeoutMs: 100,
       },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: () => 'key-of-no-concern',
+    })
     try {
       const drain = (async () => {
         for await (const _chunk of adapter.stream({ provider: 'deepseek', model: 'deepseek-chat', messages: [] })) { /* drain */ }
@@ -1194,7 +1198,10 @@ describe('abort and idle timeout', () => {
         streamIdleTimeoutMs: 100,
       },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: () => 'key-of-no-concern',
+    })
     try {
       const types: string[] = []
       const drain = (async () => {
@@ -1222,17 +1229,17 @@ describe('credentials', () => {
     expect(server.headers[0]).not.toHaveProperty('authorization')
   })
 
-  it('sends no auth header when the referenced variable is unset or empty', async () => {
+  it('fails MISSING_CREDENTIAL when the referenced variable is unset or empty', async () => {
     const server = await mockServer([{ kind: 'sse', events: textEvents }, { kind: 'sse', events: textEvents }])
     const ctx = await harness({
       deepseek: { baseURL: server.url, apiKeyEnv: 'WIRE_UNSET_KEY' },
     })
-    await chunksOf(ctx, call)
-    expect(server.headers[0]).not.toHaveProperty('authorization')
+    expect(await failureOf(ctx, call)).toMatchObject({ code: 'MISSING_CREDENTIAL' })
+    expect(server.requests).toHaveLength(0)
 
     vi.stubEnv('WIRE_UNSET_KEY', '')
-    await chunksOf(ctx, call)
-    expect(server.headers[1]).not.toHaveProperty('authorization')
+    expect(await failureOf(ctx, call)).toMatchObject({ code: 'MISSING_CREDENTIAL' })
+    expect(server.requests).toHaveLength(0)
   })
 
   it('resolves the credential through the injectable hook', async () => {
@@ -1248,14 +1255,14 @@ describe('credentials', () => {
     expect(server.headers[0]?.authorization).toBe('Bearer deepseek-key')
   })
 
-  it('reads the referenced environment variable by default', async () => {
+  it('reads the referenced environment variable when no credentials seam is mounted', async () => {
     const server = await mockServer([{ kind: 'sse', events: textEvents }])
-    vi.stubEnv('WIRE_KEY', 'ambient-key')
-    const profiles = resolveProfiles({
-      deepseek: { baseURL: server.url, apiKeyEnv: 'WIRE_KEY' },
-    }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
-    for await (const _chunk of adapter.stream(call)) { /* drain */ }
+    const ctx = await harness({
+      deepseek: { baseURL: server.url, apiKeyEnv: 'WIRE_AMBIENT_KEY' },
+    })
+    vi.stubEnv('WIRE_AMBIENT_KEY', 'ambient-key')
+
+    await chunksOf(ctx, call)
     expect(server.headers[0]?.authorization).toBe('Bearer ambient-key')
   })
 })
@@ -1290,7 +1297,7 @@ describe('adapter boundary', () => {
     const profiles = resolveProfiles({
       deepseek: { baseURL: 'https://nowhere.example', models: [{ id: 'deepseek-chat', contextWindow: 100 }] },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
 
     await expect(async () => {
       for await (const _chunk of adapter.stream({
@@ -1364,7 +1371,7 @@ describe('adapter boundary', () => {
     const profiles = resolveProfiles({
       visionai: { baseURL: server.url },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
 
     await expect(async () => {
       for await (const _chunk of adapter.stream({
@@ -1400,7 +1407,7 @@ describe('adapter boundary', () => {
     const profiles = resolveProfiles({
       deepseek: { baseURL: 'https://nowhere.example', models: [{ id: 'deepseek-chat', contextWindow: 100 }] },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
     try {
       const drain = (async () => {
         for await (const _chunk of adapter.stream({ provider: 'deepseek', model: 'deepseek-chat', messages: [] })) { /* drain */ }
@@ -1427,7 +1434,7 @@ describe('adapter boundary', () => {
     const profiles = resolveProfiles({
       deepseek: { baseURL: 'https://nowhere.example', models: [{ id: 'deepseek-chat', contextWindow: 100 }] },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
     try {
       const seen: string[] = []
       for await (const chunk of adapter.stream({ provider: 'deepseek', model: 'deepseek-chat', messages: [] })) {
@@ -1446,7 +1453,7 @@ describe('adapter boundary', () => {
     const profiles = resolveProfiles({
       deepseek: { baseURL: 'https://unreachable.example', models: [{ id: 'deepseek-chat', contextWindow: 100 }] },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
     try {
       const drain = (async () => {
         for await (const _chunk of adapter.stream({ provider: 'deepseek', model: 'deepseek-chat', messages: [] })) { /* drain */ }
@@ -1466,7 +1473,7 @@ describe('adapter boundary', () => {
     const profiles = resolveProfiles({
       deepseek: { baseURL: 'https://unreachable.example', models: [{ id: 'deepseek-chat', contextWindow: 100 }] },
     }, catalogFromSnapshot(fixtureRegistry()))
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
     try {
       const drain = (async () => {
         for await (const _chunk of adapter.stream({ provider: 'deepseek', model: 'deepseek-chat', messages: [] })) { /* drain */ }

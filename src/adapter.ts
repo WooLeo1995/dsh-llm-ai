@@ -10,7 +10,9 @@
  * `eventsource-parser` and translated into harness stream chunks. Image input
  * resolves durable attachments into transient base64 data URLs at request
  * time, gated on the model's resolved modalities and the attachments seam,
- * with over-budget history offloaded to the fixed placeholder first. Failures
+ * with over-budget history offloaded to the fixed placeholder first. The
+ * credential resolves once per stream call through the plugin-owned hook,
+ * after the image gate and before the request. Failures
  * classify into stable codes; the configured idle timeout bounds each
  * outstanding provider read without counting consumer think time.
  *
@@ -51,32 +53,23 @@ import type { WireError } from './types.ts'
 /** A value that may be supplied synchronously or asynchronously. */
 type MaybePromise<T> = T | Promise<T>
 
-/**
- * Read the referenced environment variable: without the credentials seam the
- * process environment is the whole credential plane, so the adapter reads
- * exactly the variable the profile named. An unset or empty variable carries
- * no credential and sends no header; the seam upgrade replaces this default.
- * @param profile - the route's resolved profile.
- * @returns the ambient credential value, or `undefined` when the route authenticates without one.
- */
-function ambientApiKey(profile: ResolvedLlmAiProfile): string | undefined {
-  if (profile.apiKeyEnv === undefined) return undefined
-  const value = process.env[profile.apiKeyEnv]
-  return value === undefined || value.length === 0 ? undefined : value
-}
-
 /** Constructor options for {@link LlmAiAdapter}: the operation-local hooks the plugin owns. */
 export interface LlmAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
   profiles: () => ReadonlyMap<string, ResolvedLlmAiProfile>
   /**
-   * Resolve the credential for one route's request. The one resolution point
-   * for the credential plane: today the adapter defaults to the referenced
-   * process environment variable, and the credentials-seam upgrade swaps this
-   * hook for the seam (managed store, launch environment, and the
-   * missing/invalid-credential refusals) without touching the request path.
+   * Resolve the credential for one route's request; the one resolution point
+   * for the credential plane, owned by the plugin because only it can see the
+   * optional credentials seam. Called once per stream call after the image
+   * gate, so a refusal there never resolves a credential: the plugin resolves
+   * a named reference through `ctx.credentials` when one is mounted (falling
+   * back to the trusted environment otherwise), format-checks every resolved
+   * key, and fails a reference that resolves to nothing with
+   * `MISSING_CREDENTIAL` instead of authenticating with an unrelated ambient
+   * key. `undefined` — a profile naming no reference at all — sends no
+   * authorization header.
    */
-  resolveApiKey?: (profile: ResolvedLlmAiProfile) => MaybePromise<string | undefined>
+  resolveApiKey: (profile: ResolvedLlmAiProfile) => MaybePromise<string | undefined>
   /**
    * Resolve the durable attachment service for one request's image input.
    * Read per call, never captured at construction, so Cordis load order
@@ -268,7 +261,7 @@ export class LlmAiAdapter extends LlmAdapter {
         throw new LlmError('llm-ai: image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
       }
     }
-    const apiKey = await (this.config.resolveApiKey ?? ambientApiKey)(profile)
+    const apiKey = await this.config.resolveApiKey(profile)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal

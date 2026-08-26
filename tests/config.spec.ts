@@ -113,6 +113,13 @@ describe('profile resolution refusals', () => {
   it('refuses an invalid credential reference', () => {
     expect(() => resolve({ deepseek: { apiKeyEnv: 'not a ref!' } })).toThrow()
   })
+
+  it('refuses the dropped pi-ai timeoutMs field, naming the replacement', () => {
+    expect(() => resolve({ deepseek: { timeoutMs: 5_000 } as never }))
+      .toThrow(/provider "deepseek" sets timeoutMs, which named pi-ai runtime behavior/)
+    // A valueless YAML key is the same dropped field, refused the same way.
+    expect(() => resolve({ deepseek: { timeoutMs: null } as never })).toThrow(/streamIdleTimeoutMs/)
+  })
 })
 
 describe('profile resolution results', () => {

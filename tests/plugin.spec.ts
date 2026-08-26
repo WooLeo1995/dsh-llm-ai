@@ -652,7 +652,7 @@ describe('adapter boundary', () => {
   const catalog = catalogFromSnapshot(fixtureRegistry())
 
   it('refuses providers and models it does not own', async () => {
-    const adapter = new LlmAiAdapter({ profiles: () => new Map() })
+    const adapter = new LlmAiAdapter({ profiles: () => new Map(), resolveApiKey: () => undefined })
     expect(adapter.providerInfo('ghost')).toEqual({ id: 'ghost', name: 'ghost' })
     await expect(adapter.listModels('ghost')).rejects.toMatchObject({ failure: { code: 'NO_ADAPTER' } })
     await expect(adapter.resolveModel('ghost', 'm')).rejects.toMatchObject({ failure: { code: 'NO_ADAPTER' } })
@@ -660,7 +660,7 @@ describe('adapter boundary', () => {
 
   it('refuses an unknown model on an owned route', async () => {
     const profiles = resolveProfiles({ deepseek: {} }, catalog)
-    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+    const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey: () => undefined })
     await expect(adapter.resolveModel('deepseek', 'nope')).rejects.toMatchObject({
       failure: { code: 'UNKNOWN_MODEL' },
     })

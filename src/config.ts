@@ -116,8 +116,6 @@ export interface LlmAiProviderProfile {
   headers?: Record<string, string>
   /** Route-default reasoning level, offered as the model's default when it supports the level. */
   reasoning?: ReasoningLevel
-  /** HTTP timeout in milliseconds. */
-  timeoutMs?: number
   /** Maximum provider idle time while one stream read is outstanding. */
   streamIdleTimeoutMs?: number
   /**
@@ -149,8 +147,6 @@ export interface ResolvedLlmAiProfile {
   headers?: Record<string, string>
   /** Route-default reasoning level, when configured. */
   reasoning?: ReasoningLevel
-  /** HTTP timeout in milliseconds, when configured. */
-  timeoutMs?: number
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Positive request-level base64 image payload bound after defaulting. */
@@ -240,7 +236,6 @@ const profile = z.object({
   defaultInput: z.array(z.union([...MODALITIES])).default([...DEFAULT_INPUT]),
   headers: z.dict(z.string()),
   reasoning: z.union([...REASONING_LEVELS]),
-  timeoutMs: z.natural(),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   maxRequestImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES),
   retryPolicy: RetryPolicySchema,
@@ -305,6 +300,18 @@ export function resolveProfiles(
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
     assertOwnedCompatFields(provider, 'route', source.compat)
+    // A dropped pi-ai runtime field, refused rather than silently ignored:
+    // schemastery passes unknown object keys through, so a `timeoutMs` ported
+    // from an llm-pi-ai configuration would otherwise ride the resolved
+    // profile looking applied. It named the pi-ai SDK's own request timeout;
+    // this adapter's request-level bound is the per-read idle watchdog, so the
+    // diagnostic points the porter at `streamIdleTimeoutMs`.
+    if ('timeoutMs' in source) {
+      throw new Error(
+        `llm-ai: provider "${provider}" sets timeoutMs, which named pi-ai runtime behavior this adapter does`
+        + ' not carry; bound each outstanding provider read with streamIdleTimeoutMs instead, or remove the field',
+      )
+    }
     // The schema's union refuses this on the settings path; the raw entry
     // config skips the schema, so the same refusal stands here: a route
     // naming a protocol this build cannot serve must fail where it is written.

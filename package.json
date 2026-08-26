@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-home-paths": "next",
+    "@deepseek-ai/dsh-launch-environment": "next",
     "@deepseek-ai/schemastery": "next",
     "eventsource-parser": "^3.1.1"
   },
@@ -33,6 +34,7 @@
     "@deepseek-ai/cordis": "next",
     "@deepseek-ai/dsh-attachment": "next",
     "@deepseek-ai/dsh-credentials": "next",
+    "@deepseek-ai/dsh-credentials-local": "next",
     "@deepseek-ai/dsh-llm": "next",
     "@deepseek-ai/dsh-settings": "next",
     "@deepseek-ai/dsh-settings-file": "next",

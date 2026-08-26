@@ -5,6 +5,11 @@
  * catalog as defaults, and a route the registry does not describe is declared
  * outright. The registry snapshot is fetched (or read from the disk cache)
  * once at plugin load, so a change is a plugin reload, never a hot swap.
+ * Each stream call resolves the route's credential reference — through
+ * `ctx.credentials` when that seam is mounted, the trusted environment
+ * otherwise — so a rotated key reaches the next request, and a reference that
+ * resolves to nothing fails that request instead of authenticating with an
+ * unrelated ambient key.
  *
  * ```yaml
  * - id: llm
@@ -49,6 +54,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { LlmAiAdapter } from './adapter.ts'
@@ -172,8 +179,44 @@ export async function apply(ctx: Context, config: ConfigType): Promise<void> {
   }
   profiles()
 
+  /**
+   * Resolve one route's credential for one stream call. A profile naming no
+   * reference at all defers to ambient discovery (this runtime sends no
+   * authorization header); once one is named, a miss must fail loud — handing
+   * the request no key would let a gateway authenticate it against an
+   * unrelated ambient account. The credentials seam is resolved per call for
+   * the same reason the attachments seam is: Cordis load order must not
+   * freeze optional availability, and when one is mounted its own layers
+   * already include the trusted environment, so no second read of the
+   * environment happens beside it.
+   */
+  const resolveApiKey = async (profile: ResolvedLlmAiProfile): Promise<string | undefined> => {
+    const ref = profile.apiKeyEnv
+    if (ref === undefined) return undefined
+    const credentials = ctx.get('credentials')
+    const hit = credentials !== undefined
+      ? (await credentials.resolve(ref))?.value
+      // Without the seam there is no managed store to rank against, so the
+      // trusted environment is the whole credential plane.
+      : launchEnvironmentOf(ctx).get(ref)?.value
+    // Trimmed and header-carryable before it can reach a request; a refusal
+    // names the route and the reference, never any part of the key.
+    if (hit !== undefined && hit.length > 0) {
+      return assertUsableApiKey(hit, `llm-ai provider route "${profile.provider}"`, ref)
+    }
+    throw new LlmError(
+      `llm-ai: no credential for provider route "${profile.provider}"; its profile names apiKeyEnv ${ref},`
+      + ` which is not set — store ${ref} through the credentials service (the web Models page writes it)`
+      + ' or export it in the launching environment, or remove apiKeyEnv from the providers entry'
+      + ' (cordis.yml or the llm-ai: settings section) if this route should authenticate without a'
+      + ' bearer token',
+      'MISSING_CREDENTIAL',
+    )
+  }
+
   const adapter = new LlmAiAdapter({
     profiles,
+    resolveApiKey,
     // Resolved per call rather than injected: the attachment service is an
     // optional composition fact, so a composition loading it after this
     // plugin still serves image requests and one omitting it keeps text-only
