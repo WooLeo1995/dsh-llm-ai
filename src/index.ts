@@ -61,6 +61,7 @@ import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deeps
 import { LlmAiAdapter } from './adapter.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { Config as ConfigType, ResolvedLlmAiProfile } from './config.ts'
+import { discoverModels } from './discovery.ts'
 import { loadRegistryCatalog } from './modelsdev.ts'
 import type { RegistryCatalog } from './modelsdev.ts'
 
@@ -249,6 +250,37 @@ export async function apply(ctx: Context, config: ConfigType): Promise<void> {
     directoryFacts = entries
   }
   ensureDirectory()
+  // Interrogating an endpoint is a configuration-time action over a draft, so
+  // it is offered for the whole namespace rather than per route: the provider
+  // a surface is adding does not exist yet. The draft carries the endpoint and
+  // the typed key the user is still editing; a route the draft names supplies
+  // its stored endpoint and, through the same resolver a request uses, its
+  // stored credential — a redacted descriptor holds no key, so interrogating a
+  // configured route unauthenticated would answer 401 and read as a wrong key.
+  ctx.llm.registerModelDiscovery(NS, request => discoverModels(request, {
+    route: (provider) => {
+      const profile = profiles().get(provider)
+      // The endpoint a request to this route would use: the profile's declared
+      // override, else the registry provider's base URL — also for a registry
+      // provider no profile stores yet, which is the create draft a surface
+      // offers from the directory. Resolution guarantees a stored profile
+      // always has one, so this is undefined exactly when neither a profile
+      // nor the registry describes the route.
+      const baseURL = profile?.baseURL ?? catalog.provider(provider)?.baseUrl
+      if (baseURL === undefined) return undefined
+      return {
+        baseURL,
+        ...profile?.apiKeyEnv === undefined ? {} : { apiKeyEnv: profile.apiKeyEnv },
+      }
+    },
+    resolveStoredApiKey: async (provider) => {
+      const profile = profiles().get(provider)
+      // A route no profile stores is the create case: nothing is stored, so
+      // nothing is resolved and the endpoint is asked unauthenticated.
+      if (profile === undefined) return undefined
+      return resolveApiKey(profile)
+    },
+  }))
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below. A bare
   // mount (zero routes) is the dormant posture: nothing registers until a

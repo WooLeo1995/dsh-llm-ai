@@ -28,6 +28,13 @@ export function supportedProtocols(): readonly string[] {
 }
 
 /**
+ * The protocol a draft naming none is asked as: the table's first entry, which
+ * in v1 is also its only one and the one every servable route defaults to.
+ * Widening the table changes this default with it.
+ */
+export const DEFAULT_PROTOCOL: (typeof PROTOCOLS)[number] = PROTOCOLS[0]
+
+/**
  * Registry provider routes whose wire protocol `openai-completions` cannot
  * serve, mapped to the protocol each one actually speaks. These are the
  * provider ids the spec withholds from route registration in v1: the native
