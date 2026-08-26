@@ -2,8 +2,8 @@
  * The openai-completions wire runtime at the `ctx.llm` seam: a local mock SSE
  * server drives the adapter through real loopback HTTP, asserting exact chunk
  * sequences, request shapes, error-code classification, timeout-vs-abort,
- * reasoning dispatch, and single-request semantics. No test touches the
- * network.
+ * reasoning dispatch, image input with oldest-first offload, and
+ * single-request semantics. No test touches the network.
  */
 
 import { join } from 'node:path'
@@ -15,13 +15,28 @@ import LlmRuntime, {
   createMessage,
   createToolResultMessage,
   createUserMessage,
+  OFFLOADED_IMAGE_TEXT,
   ReasoningEffortId,
   userAgent,
 } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, ImageBlock, LlmFailure, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
+import AttachmentStore, { AttachmentError, AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type {
+  ImageAttachmentLimits,
+  ImageAttachmentRef,
+  SaveImageAttachment,
+  StoredImageAttachment,
+} from '@deepseek-ai/dsh-attachment'
 import * as LlmAi from '../src/index.ts'
 import { LlmAiAdapter } from '../src/index.ts'
 import { resolveProfiles } from '../src/config.ts'
+import {
+  PROTOCOL_DEFAULT_DIALECT,
+  serializeMessagesWithImages,
+  serializeRequest,
+  serializeRequestWithImages,
+} from '../src/serialize.ts'
+import type { ThinkingDispatch } from '../src/serialize.ts'
 import { catalogFromSnapshot } from '../src/modelsdev.ts'
 import { fixtureRegistry, home, registryServer } from './registry.ts'
 import { mockServer, textEvents } from './mock-server.ts'
@@ -245,28 +260,396 @@ describe('text streaming', () => {
     })
     expect(server.requests).toHaveLength(3)
   })
+})
 
-  it('refuses image content before any network I/O until image support lands', async () => {
+/** One durable image reference with a distinct id, media type, and encoded size. */
+function imageRef(seed: string, mediaType: ImageAttachmentRef['mediaType'], bytes: number): ImageAttachmentRef {
+  return {
+    attachmentId: AttachmentId(`sha256:${seed.repeat(64)}`),
+    mediaType,
+    bytes,
+    width: 1,
+    height: 1,
+  }
+}
+
+const IMAGE_PNG_A = imageRef('a', 'image/png', 3)
+const IMAGE_JPEG_B = imageRef('b', 'image/jpeg', 6)
+const IMAGE_PNG_C = imageRef('c', 'image/png', 3)
+
+/** An image block carrying one durable reference. */
+const imageBlock = (ref: ImageAttachmentRef): ImageBlock => ({ type: 'image', attachment: ref })
+
+/**
+ * In-memory attachment store standing in for the durable seam: records every
+ * read so tests can prove omitted attachments are never read, and serves the
+ * bytes the test staged for each id.
+ */
+class RecordingAttachmentStore extends AttachmentStore {
+  /** Attachment ids read, in request order. */
+  readonly reads: string[] = []
+  /** Staged bytes by attachment id; unstaged ids read as a fixed sentinel. */
+  readonly images = new Map<string, Uint8Array>()
+  /** When set, readImage throws it instead of serving bytes. */
+  readFailure: unknown
+
+  override readonly imageLimits: ImageAttachmentLimits = {
+    maxImageBytes: 3_500_000,
+    maxImagesPerMessage: 20,
+    maxMessageImageBytes: 14_000_000,
+    maxImagePixels: 4_000_000,
+    maxImageDimension: 2_048,
+    mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+  }
+
+  override validateImage(_input: SaveImageAttachment): Promise<void> {
+    return Promise.resolve()
+  }
+
+  override saveImage(_input: SaveImageAttachment): Promise<ImageAttachmentRef> {
+    return Promise.reject(new Error('the wire suite never saves images'))
+  }
+
+  override readImage(ref: ImageAttachmentRef, _signal?: AbortSignal): Promise<StoredImageAttachment> {
+    this.reads.push(String(ref.attachmentId))
+    if (this.readFailure !== undefined) throw this.readFailure
+    return Promise.resolve({ ref, data: this.images.get(String(ref.attachmentId)) ?? Uint8Array.of(9) })
+  }
+}
+
+/** Boot the runtime plus this plugin with the attachment service present. */
+async function attachmentHarness(
+  script: Behavior[],
+  providers: (url: string) => Record<string, LlmAi.LlmAiProviderProfile>,
+  order: 'store-first' | 'adapter-first' = 'store-first',
+): Promise<{ ctx: Context; server: MockServer; store: RecordingAttachmentStore }> {
+  const server = await mockServer(script)
+  const registry = await registryServer(fixtureRegistry())
+  cleanups.push(registry.close)
+  const ctx = new Context()
+  cleanups.push(async () => {
+    await ctx.fiber.dispose()
+  })
+  await ctx.plugin(LlmRuntime)
+  const mount = async (): Promise<void> => {
+    await ctx.plugin(LlmAi, {
+      catalogUrl: registry.url,
+      catalogCachePath: join(await home('dsh-ai-image-'), 'cache.json'),
+      providers: providers(server.url),
+    })
+  }
+  // The adapter resolves the service per call, so either load order serves
+  // image requests; `adapter-first` proves availability is not frozen at mount.
+  if (order === 'store-first') {
+    await ctx.plugin(RecordingAttachmentStore)
+    await mount()
+  } else {
+    await mount()
+    await ctx.plugin(RecordingAttachmentStore)
+  }
+  return { ctx, server, store: ctx.get('attachments') as RecordingAttachmentStore }
+}
+
+/** The visionai route with its registry catalog, against one mock server. */
+function visionHarness(
+  script: Behavior[],
+  profile: (url: string) => LlmAi.LlmAiProviderProfile = url => route(url),
+): Promise<{ ctx: Context; server: MockServer; store: RecordingAttachmentStore }> {
+  return attachmentHarness(script, url => ({ visionai: profile(url) }))
+}
+
+/** The vision-capable fixture route's default call. */
+const visionCall: GenerateOptions = { provider: 'visionai', model: 'vision-large', messages: [] }
+
+const imageMessage = (content: Parameters<typeof createUserMessage>[0]['content']): Message => createUserMessage({
+  content,
+  source: { kind: 'user' },
+})
+
+describe('image input and offload', () => {
+  it('sends durable images as ordered base64 data URLs preserving text/image order', async () => {
+    const { ctx, server, store } = await visionHarness([{ kind: 'sse', events: textEvents }])
+    store.images.set(String(IMAGE_PNG_A.attachmentId), Uint8Array.of(1, 2, 3))
+    store.images.set(String(IMAGE_JPEG_B.attachmentId), Uint8Array.of(4, 5, 6))
+
+    await chunksOf(ctx, {
+      ...visionCall,
+      messages: [imageMessage([
+        imageBlock(IMAGE_PNG_A),
+        { type: 'text', text: 'describe both' },
+        imageBlock(IMAGE_JPEG_B),
+        // Blocks outside the user-input wire vocabulary ride along in typed
+        // content without reaching the wire.
+        { type: 'tool-call', id: CallId('call-x'), name: 'noop', arguments: '{}' },
+      ])],
+    })
+
+    expect(server.requests[0]).toMatchObject({
+      model: 'vision-large',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+          { type: 'text', text: 'describe both' },
+          { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,BAUG' } },
+        ],
+      }],
+    })
+    expect(store.reads).toEqual([String(IMAGE_PNG_A.attachmentId), String(IMAGE_JPEG_B.attachmentId)])
+  })
+
+  it('follows tool-result images with their string-only tool messages in one user message', async () => {
+    const { ctx, server, store } = await visionHarness([{ kind: 'sse', events: textEvents }])
+    store.images.set(String(IMAGE_PNG_A.attachmentId), Uint8Array.of(1, 2, 3))
+    store.images.set(String(IMAGE_JPEG_B.attachmentId), Uint8Array.of(4, 5, 6))
+
+    const messages: Message[] = [
+      systemMessage('workspace rules'),
+      createAssistantMessage({
+        content: [{ type: 'tool-call', id: CallId('call-1'), name: 'screenshot', arguments: '{}' }],
+        source: { provider: 'visionai', model: 'vision-large' },
+      }),
+      createToolResultMessage({
+        callId: CallId('call-1'),
+        content: [{ type: 'text', text: '22C' }, imageBlock(IMAGE_PNG_A)],
+        isError: false,
+      }),
+      createToolResultMessage({
+        callId: CallId('call-2'),
+        content: [imageBlock(IMAGE_JPEG_B)],
+        isError: false,
+      }),
+      createToolResultMessage({ callId: CallId('call-3'), content: [], isError: false }),
+      user('and tomorrow?'),
+    ]
+    await chunksOf(ctx, { ...visionCall, messages })
+
+    expect(server.requests[0]).toMatchObject({
+      messages: [
+        { role: 'system', content: 'workspace rules' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'screenshot', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'call-1', content: '22C' },
+        { role: 'tool', tool_call_id: 'call-2', content: '(see attached image)' },
+        { role: 'tool', tool_call_id: 'call-3', content: '(no output)' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Attached image(s) from tool result:' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+            { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,BAUG' } },
+          ],
+        },
+        { role: 'user', content: 'and tomorrow?' },
+      ],
+    })
+  })
+
+  it('offloads the oldest images to the fixed placeholder until the request fits, without reading them', async () => {
+    // Base64 sizes: A=4, B=8, C=4; the bound of 12 fits only after A leaves.
+    const { ctx, server, store } = await visionHarness(
+      [{ kind: 'sse', events: textEvents }],
+      url => route(url, { maxRequestImageBytes: 12 }),
+    )
+    store.images.set(String(IMAGE_JPEG_B.attachmentId), Uint8Array.of(4, 5, 6))
+    store.images.set(String(IMAGE_PNG_C.attachmentId), Uint8Array.of(1, 2, 3))
+
+    await chunksOf(ctx, {
+      ...visionCall,
+      messages: [
+        imageMessage([imageBlock(IMAGE_PNG_A), imageBlock(IMAGE_JPEG_B)]),
+        imageMessage([imageBlock(IMAGE_PNG_C)]),
+        user(''),
+      ],
+    })
+
+    expect(server.requests[0]).toMatchObject({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: OFFLOADED_IMAGE_TEXT },
+            { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,BAUG' } },
+          ],
+        },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } }] },
+        { role: 'user', content: '' },
+      ],
+    })
+    expect(store.reads).toEqual([String(IMAGE_JPEG_B.attachmentId), String(IMAGE_PNG_C.attachmentId)])
+  })
+
+  it('rejects image input when the attachment service is absent, while text-only calls never need it', async () => {
     const server = await mockServer([{ kind: 'sse', events: textEvents }])
     const ctx = await harness({ visionai: { baseURL: server.url } })
 
-    const image: ImageBlock = {
-      type: 'image',
-      attachment: {
-        attachmentId: 'sha256:00',
-        mediaType: 'image/png',
-        bytes: 3,
-        width: 1,
-        height: 1,
-      } as ImageBlock['attachment'],
-    }
     const failure = await failureOf(ctx, {
-      provider: 'visionai',
-      model: 'vision-large',
-      messages: [createUserMessage({ content: [image], source: { kind: 'user' } })],
+      ...visionCall,
+      messages: [imageMessage([imageBlock(IMAGE_PNG_A)])],
     })
     expect(failure.code).toBe('UNSUPPORTED_CONTENT')
+    expect(failure.message).toMatch(/requires the durable attachment service/)
     expect(server.requests).toHaveLength(0)
+
+    await chunksOf(ctx, { ...visionCall, messages: [user('plain text')] })
+    expect(server.requests).toHaveLength(1)
+  })
+
+  it('surfaces attachment verification failures under the store code, and other read faults as TRANSPORT', async () => {
+    const { ctx, server, store } = await visionHarness([{ kind: 'sse', events: textEvents }])
+
+    store.readFailure = new AttachmentError('stored image no longer matches its reference', 'ATTACHMENT_CORRUPT')
+    const corrupt = await failureOf(ctx, {
+      ...visionCall,
+      messages: [imageMessage([imageBlock(IMAGE_PNG_A)])],
+    })
+    expect(corrupt).toMatchObject({
+      code: 'ATTACHMENT_CORRUPT',
+      message: 'stored image no longer matches its reference',
+    })
+
+    store.readFailure = new Error('disk gone')
+    const transport = await failureOf(ctx, {
+      ...visionCall,
+      messages: [imageMessage([imageBlock(IMAGE_PNG_A)])],
+    })
+    expect(transport.code).toBe('TRANSPORT')
+    expect(server.requests).toHaveLength(0)
+  })
+
+  it('refuses image content in a message whose wire role cannot carry it', async () => {
+    const { ctx, server } = await visionHarness([{ kind: 'sse', events: textEvents }])
+
+    const failure = await failureOf(ctx, {
+      ...visionCall,
+      messages: [createMessage({
+        role: 'system',
+        content: [imageBlock(IMAGE_PNG_A)],
+        source: { kind: 'plugin', plugin: 'wire-test' },
+      })],
+    })
+    expect(failure.code).toBe('UNSUPPORTED_CONTENT')
+    expect(failure.message).toMatch(/system message/)
+    expect(server.requests).toHaveLength(0)
+  })
+
+  it('keeps a registry model image-capable when the entry names it without declaring input', async () => {
+    const { ctx, server, store } = await visionHarness(
+      [{ kind: 'sse', events: textEvents }],
+      url => route(url, { models: [{ id: 'vision-large' }] }),
+    )
+    store.images.set(String(IMAGE_PNG_A.attachmentId), Uint8Array.of(1, 2, 3))
+
+    await chunksOf(ctx, { ...visionCall, messages: [imageMessage([imageBlock(IMAGE_PNG_A)])] })
+
+    const content = (server.requests[0] as { messages: Array<{ content: unknown }> }).messages[0]?.content
+    expect(JSON.stringify(content)).toContain('data:image/png;base64,AQID')
+  })
+
+  it('admits image input on a hand-declared model through the route default', async () => {
+    const { ctx, server, store } = await attachmentHarness(
+      [{ kind: 'sse', events: textEvents }],
+      url => ({
+        newai: {
+          baseURL: url,
+          defaultInput: ['text', 'image'],
+          models: [{ id: 'new-vision', contextWindow: 4_096 }],
+        },
+      }),
+    )
+    store.images.set(String(IMAGE_PNG_A.attachmentId), Uint8Array.of(1, 2, 3))
+
+    await chunksOf(ctx, {
+      provider: 'newai',
+      model: 'new-vision',
+      messages: [imageMessage([imageBlock(IMAGE_PNG_A)])],
+    })
+
+    const content = (server.requests[0] as { messages: Array<{ content: unknown }> }).messages[0]?.content
+    expect(JSON.stringify(content)).toContain('data:image/png;base64,AQID')
+  })
+
+  it('resolves the attachment service per call, so load order does not freeze availability', async () => {
+    const { ctx, server, store } = await attachmentHarness(
+      [{ kind: 'sse', events: textEvents }],
+      url => ({ visionai: { baseURL: url } }),
+      'adapter-first',
+    )
+    store.images.set(String(IMAGE_PNG_A.attachmentId), Uint8Array.of(1, 2, 3))
+
+    await chunksOf(ctx, { ...visionCall, messages: [imageMessage([imageBlock(IMAGE_PNG_A)])] })
+
+    const content = (server.requests[0] as { messages: Array<{ content: unknown }> }).messages[0]?.content
+    expect(JSON.stringify(content)).toContain('data:image/png;base64,AQID')
+  })
+})
+
+describe('image serialization units', () => {
+  /** Structural stand-in: the direct conversion tests read images and nothing else. */
+  const attachmentStore = (): AttachmentStore => ({
+    readImage: (ref: ImageAttachmentRef) => Promise.resolve({ ref, data: Uint8Array.of(1, 2, 3) }),
+  } as unknown as AttachmentStore)
+
+  const signal = (): AbortSignal => new AbortController().signal
+
+  it('recursively converts nested tool-result content and keeps the empty fallback', async () => {
+    const messages = [createUserMessage({
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId: CallId('nested'),
+          content: [{
+            type: 'tool-result',
+            toolCallId: CallId('inner'),
+            content: [{ type: 'text', text: 'inside' }],
+          }],
+        },
+        { type: 'tool-result', toolCallId: CallId('empty'), content: [] },
+      ],
+      source: { kind: 'user' },
+    })]
+
+    await expect(serializeMessagesWithImages(
+      messages,
+      attachmentStore(),
+      signal(),
+      PROTOCOL_DEFAULT_DIALECT,
+    )).resolves.toEqual([
+      { role: 'tool', tool_call_id: 'nested', content: 'inside' },
+      { role: 'tool', tool_call_id: 'empty', content: '(no output)' },
+    ])
+  })
+
+  it('carries the request system prompt on the image path', async () => {
+    const profiles = resolveProfiles({
+      visionai: { baseURL: 'https://nowhere.example' },
+    }, catalogFromSnapshot(fixtureRegistry()))
+    const profile = profiles.get('visionai')!
+    const model = profile.models.find(entry => entry.id === 'vision-large')!
+
+    const request = await serializeRequestWithImages(
+      {
+        provider: 'visionai',
+        model: 'vision-large',
+        system: 'be brief',
+        messages: [imageMessage([imageBlock(IMAGE_PNG_A)])],
+      },
+      profile,
+      model,
+      { state: 'none' } satisfies ThinkingDispatch,
+      { attachments: attachmentStore(), maxRequestImageBytes: 20 * 1024 * 1024, signal: signal() },
+    )
+
+    expect(request.messages).toEqual([
+      { role: 'system', content: 'be brief' },
+      {
+        role: 'user',
+        content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } }],
+      },
+    ])
   })
 })
 
@@ -745,6 +1128,99 @@ describe('adapter boundary', () => {
         reasoningEffort: ReasoningEffortId('gigantic'),
       })) { /* drain */ }
     }).rejects.toMatchObject({ failure: { code: 'UNSUPPORTED_REASONING_EFFORT' } })
+  })
+
+  // The llm runtime projects images to deterministic text for models whose
+  // reported input modalities omit image before dispatch, so the adapter's
+  // own modality refusal is only reachable from a direct registration — the
+  // same boundary pattern as the reasoning-vocabulary refusal above.
+  const textOnlyRoutes: Array<{
+    case: string
+    provider: string
+    model: string
+    profile: Partial<Omit<LlmAi.LlmAiProviderProfile, 'baseURL'>>
+  }> = [
+    {
+      case: 'a registry text-only model',
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+      profile: {},
+    },
+    {
+      case: 'a route-narrowed entry',
+      provider: 'visionai',
+      model: 'vision-large',
+      profile: { models: [{ id: 'vision-large', input: ['text'] }] },
+    },
+    {
+      case: 'an undeclared hand-declared model on the text route default',
+      provider: 'privateai',
+      model: 'priv-lm',
+      profile: { models: [{ id: 'priv-lm', contextWindow: 1_000 }] },
+    },
+  ]
+  for (const route of textOnlyRoutes) {
+    it(`refuses image input for ${route.case} before credential, attachment, or network I/O`, async () => {
+      const server = await mockServer([{ kind: 'sse', events: textEvents }])
+      const resolveApiKey = vi.fn(() => 'never')
+      const resolveAttachments = vi.fn(() => ({}) as AttachmentStore)
+      const profiles = resolveProfiles({
+        [route.provider]: { baseURL: server.url, ...route.profile },
+      }, catalogFromSnapshot(fixtureRegistry()))
+      const adapter = new LlmAiAdapter({ profiles: () => profiles, resolveApiKey, resolveAttachments })
+
+      await expect(async () => {
+        for await (const _chunk of adapter.stream({
+          provider: route.provider,
+          model: route.model,
+          messages: [createUserMessage({ content: [imageBlock(IMAGE_PNG_A)], source: { kind: 'user' } })],
+        })) { /* drain */ }
+      }).rejects.toMatchObject({
+        failure: {
+          code: 'UNSUPPORTED_CONTENT',
+          message: `llm-ai: provider "${route.provider}" model "${route.model}" does not accept image input`,
+        },
+      })
+      expect(resolveApiKey).not.toHaveBeenCalled()
+      expect(resolveAttachments).not.toHaveBeenCalled()
+      expect(server.requests).toHaveLength(0)
+    })
+  }
+
+  it('refuses image input before network I/O when no attachment resolver is configured', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const profiles = resolveProfiles({
+      visionai: { baseURL: server.url },
+    }, catalogFromSnapshot(fixtureRegistry()))
+    const adapter = new LlmAiAdapter({ profiles: () => profiles })
+
+    await expect(async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'visionai',
+        model: 'vision-large',
+        messages: [createUserMessage({ content: [imageBlock(IMAGE_PNG_A)], source: { kind: 'user' } })],
+      })) { /* drain */ }
+    }).rejects.toMatchObject({ failure: { code: 'UNSUPPORTED_CONTENT' } })
+    expect(server.requests).toHaveLength(0)
+  })
+
+  it('refuses image content handed to the sync text serialization path', () => {
+    const profiles = resolveProfiles({
+      visionai: { baseURL: 'https://nowhere.example' },
+    }, catalogFromSnapshot(fixtureRegistry()))
+    const profile = profiles.get('visionai')!
+    const model = profile.models.find(entry => entry.id === 'vision-large')!
+
+    expect(() => serializeRequest(
+      {
+        provider: 'visionai',
+        model: 'vision-large',
+        messages: [createUserMessage({ content: [imageBlock(IMAGE_PNG_A)], source: { kind: 'user' } })],
+      },
+      profile,
+      model,
+      { state: 'none' } satisfies ThinkingDispatch,
+    )).toThrow(/received image content outside the image serialization path/)
   })
 
   it('throws EMPTY_RESPONSE when a 200 carries no body', async () => {

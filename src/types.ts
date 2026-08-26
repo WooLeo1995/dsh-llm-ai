@@ -30,11 +30,31 @@ export interface WireSystemMessage {
   content: string
 }
 
-/** User-role message with string content; multimodal parts arrive with image support. */
+/**
+ * User-role message. Text-only content keeps the compact string form; a
+ * message carrying images sends ordered parts instead, with each image a
+ * transient base64 data URL resolved from the attachment store at request
+ * time — durable session messages never hold the bytes.
+ */
 export interface WireUserMessage {
   role: 'user'
-  content: string
+  content: string | WireUserContentPart[]
 }
+
+/** Text part of a multimodal user message. */
+export interface WireTextContentPart {
+  type: 'text'
+  text: string
+}
+
+/** One transient image part: a `data:<media>;base64` URL, never a durable reference. */
+export interface WireImageContentPart {
+  type: 'image_url'
+  image_url: { url: string }
+}
+
+/** One entry of a multimodal user message's content array, in display order. */
+export type WireUserContentPart = WireTextContentPart | WireImageContentPart
 
 /** Tool-role message: the result of one tool call, keyed by its call id. */
 export interface WireToolMessage {

@@ -18,6 +18,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "next",
+    "@deepseek-ai/dsh-attachment": "next",
     "@deepseek-ai/dsh-credentials": "next",
     "@deepseek-ai/dsh-llm": "next",
     "@deepseek-ai/dsh-settings": "next",
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "next",
+    "@deepseek-ai/dsh-attachment": "next",
     "@deepseek-ai/dsh-credentials": "next",
     "@deepseek-ai/dsh-llm": "next",
     "@deepseek-ai/dsh-settings": "next",

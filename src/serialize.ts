@@ -1,19 +1,27 @@
 /**
  * Serialize harness requests into the `openai-completions` wire dialect, and
  * dispatch reasoning efforts through the spellings a route's catalog
- * resolved. Text-only for now: image input and request-size offload are the
- * image ticket, and a request carrying image content is refused here rather
- * than silently flattened.
+ * resolved. Text-only requests stay on the compact sync path; image-bearing
+ * ones resolve durable attachments into ordered base64 data-URL parts, with
+ * over-budget history offloaded to the fixed placeholder first.
  *
  * @module dsh-llm-ai/serialize
  */
 
-import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, LlmError, offloadRequestImages } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { AttachmentError } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { REASONING_LEVELS } from './catalog.ts'
 import type { ReasoningLevel, ResolvedModel } from './catalog.ts'
 import type { ResolvedLlmAiProfile } from './config.ts'
-import type { WireMessage, WireRequest, WireTool } from './types.ts'
+import type {
+  WireImageContentPart,
+  WireMessage,
+  WireRequest,
+  WireTool,
+  WireUserContentPart,
+} from './types.ts'
 
 /**
  * The request-shape choices a wire dialect makes. The protocol default is
@@ -103,23 +111,131 @@ export function serializeThinking(dispatch: ThinkingDispatch): Pick<Partial<Wire
   }
 }
 
-/** Join the text blocks of a message (used for user/tool-result content). */
+/**
+ * The sync text path rejects image content before any text-flattening can
+ * silently erase it. The adapter routes image-bearing requests to
+ * {@link serializeRequestWithImages}; this guard keeps the exported text path
+ * honest if it is handed images anyway.
+ */
+function assertTextOnly(provider: string, model: string, blocks: readonly ContentBlock[]): void {
+  if (contentHasImage(blocks)) {
+    throw new LlmError(
+      `llm-ai: provider "${provider}" model "${model}" received image content outside the image serialization path`,
+      'UNSUPPORTED_CONTENT',
+    )
+  }
+}
+
+/** Dependencies required only when the request contains image input. */
+export interface ImageSerializationOptions {
+  /** Durable resolver for canonical image references; verifies stored bytes on read. */
+  attachments: AttachmentStore
+  /** Positive bound on accumulated base64 image payload. */
+  maxRequestImageBytes: number
+  /** Cancellation shared with the provider request. */
+  signal: AbortSignal
+}
+
+/** Prefix of the user message that carries tool-result images after their tool messages. */
+const TOOL_RESULT_IMAGE_TEXT = 'Attached image(s) from tool result:'
+
+/**
+ * Reject image content in roles whose wire form cannot carry it. Only user
+ * messages (which hold the harness's tool results) serialize images; a system
+ * or assistant message bearing an image block is a vocabulary change this
+ * runtime has not followed, and flattening it away would lose model-visible
+ * input silently.
+ */
+function assertSupportedImageRoles(provider: string, model: string, messages: readonly Message[]): void {
+  for (const message of messages) {
+    if (message.role !== 'user' && contentHasImage(message.content)) {
+      throw new LlmError(
+        `llm-ai: provider "${provider}" model "${model}" cannot serialize image content in a ${message.role} message`,
+        'UNSUPPORTED_CONTENT',
+      )
+    }
+  }
+}
+
+/**
+ * Resolve one durable image into its transient wire data-URL part. The
+ * attachment store verifies the stored bytes against the reference; a
+ * verification failure surfaces under its own stable code rather than a
+ * generic serialization error.
+ * @param block - the image block whose attachment to read.
+ * @param attachments - durable image resolver.
+ * @param signal - cancellation for the attachment read.
+ * @returns the base64 image_url part.
+ */
+async function imagePart(
+  block: Extract<ContentBlock, { type: 'image' }>,
+  attachments: AttachmentStore,
+  signal: AbortSignal,
+): Promise<WireImageContentPart> {
+  try {
+    const stored = await attachments.readImage(block.attachment, signal)
+    return {
+      type: 'image_url',
+      image_url: {
+        url: `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`,
+      },
+    }
+  } catch (error: unknown) {
+    if (error instanceof AttachmentError) {
+      throw new LlmError(error.message, error.code, { cause: error })
+    }
+    throw error
+  }
+}
+
+/**
+ * Convert user or nested tool-result blocks into ordered wire parts.
+ * @param blocks - typed model content, possibly nesting tool-result content.
+ * @param attachments - durable image resolver.
+ * @param signal - cancellation for attachment reads.
+ * @returns text and image parts in block order.
+ */
+async function contentParts(
+  blocks: readonly ContentBlock[],
+  attachments: AttachmentStore,
+  signal: AbortSignal,
+): Promise<WireUserContentPart[]> {
+  const parts: WireUserContentPart[] = []
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'text':
+        if (block.text.length > 0) parts.push({ type: 'text', text: block.text })
+        break
+      case 'image':
+        parts.push(await imagePart(block, attachments, signal))
+        break
+      case 'tool-result':
+        parts.push(...await contentParts(block.content, attachments, signal))
+        break
+      default:
+        // Other merge-extensible blocks are not user-input wire vocabulary.
+        break
+    }
+  }
+  return parts
+}
+
+/** Keep text-only user messages on the compact string wire form. */
+function userContent(parts: readonly WireUserContentPart[]): string | WireUserContentPart[] {
+  const text: string[] = []
+  for (const part of parts) {
+    if (part.type === 'image_url') return [...parts]
+    text.push(part.text)
+  }
+  return text.join('')
+}
+
+/** Join the text blocks of a message (used for system/assistant content). */
 function flattenText(blocks: readonly ContentBlock[]): string {
   return blocks
     .filter(block => block.type === 'text')
     .map(block => block.text)
     .join('')
-}
-
-/** Reject core image content before any text-flattening path can silently erase it. */
-function assertTextOnly(provider: string, model: string, blocks: readonly ContentBlock[]): void {
-  if (contentHasImage(blocks)) {
-    throw new LlmError(
-      `llm-ai: provider "${provider}" model "${model}" received image content, which the`
-        + ' openai-completions runtime does not serialize yet',
-      'UNSUPPORTED_CONTENT',
-    )
-  }
 }
 
 /** Serialize one assistant message (text + reasoning + tool calls). */
@@ -193,9 +309,102 @@ export function serializeMessages(
 }
 
 /**
- * Build the full wire request. Always streaming (`stream: true`, usage
- * reporting on); optional fields are omitted rather than sent as null, so
- * endpoint defaults apply. Tool-choice and stop-sequence mapping stay cut.
+ * Serialize image-capable history after resolving durable attachments.
+ * Tool-result content stays in its string-only `tool` message, and the images
+ * it carried follow in one user message after the run of tool messages, so
+ * the wire keeps every image in the conversation position the model saw it.
+ * @param messages - transient request history after request-size offloading.
+ * @param attachments - durable image resolver.
+ * @param signal - cancellation for attachment reads.
+ * @param dialect - the wire dialect naming the system-slot role.
+ * @returns the wire messages; order preserved, tool-result images grouped into one following user message.
+ */
+export async function serializeMessagesWithImages(
+  messages: readonly Message[],
+  attachments: AttachmentStore,
+  signal: AbortSignal,
+  dialect: WireDialect,
+): Promise<WireMessage[]> {
+  const wire: WireMessage[] = []
+  let pendingToolImages: WireImageContentPart[] = []
+  const flushToolImages = (): void => {
+    if (pendingToolImages.length === 0) return
+    wire.push({
+      role: 'user',
+      content: [{ type: 'text', text: TOOL_RESULT_IMAGE_TEXT }, ...pendingToolImages],
+    })
+    pendingToolImages = []
+  }
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      flushToolImages()
+      wire.push({ role: dialect.systemRole, content: flattenText(message.content) })
+      continue
+    }
+    if (message.role === 'assistant') {
+      flushToolImages()
+      wire.push(serializeAssistant(message))
+      continue
+    }
+
+    const regular = message.content.filter(block => block.type !== 'tool-result')
+    const toolResults = message.content.filter((block): block is Extract<ContentBlock, { type: 'tool-result' }> => (
+      block.type === 'tool-result'
+    ))
+    const content = userContent(await contentParts(regular, attachments, signal))
+    if (content.length > 0 || toolResults.length === 0) {
+      flushToolImages()
+      wire.push({ role: 'user', content })
+    }
+    for (const result of toolResults) {
+      const parts = await contentParts(result.content, attachments, signal)
+      const images = parts.filter((part): part is WireImageContentPart => part.type === 'image_url')
+      const text = parts.filter(part => part.type === 'text').map(part => part.text).join('')
+      wire.push({
+        role: 'tool',
+        tool_call_id: result.toolCallId,
+        content: text || (images.length > 0 ? '(see attached image)' : '(no output)'),
+      })
+      pendingToolImages.push(...images)
+    }
+  }
+  flushToolImages()
+  return wire
+}
+
+/** Assemble the request fields every conversion path shares once messages are built. */
+function requestWithMessages(
+  options: GenerateOptions,
+  messages: WireMessage[],
+  thinking: ThinkingDispatch,
+  dialect: WireDialect,
+): WireRequest {
+  const tools: WireTool[] | undefined = options.tools?.map(tool => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    },
+  }))
+  return {
+    model: options.model,
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },
+    ...serializeThinking(thinking),
+    ...tools !== undefined && tools.length > 0 ? { tools } : {},
+    ...options.temperature !== undefined ? { temperature: options.temperature } : {},
+    ...options.maxTokens === undefined ? {} : { [dialect.maxTokensField]: options.maxTokens },
+  }
+}
+
+/**
+ * Build the full wire request for text-only content. Always streaming
+ * (`stream: true`, usage reporting on); optional fields are omitted rather
+ * than sent as null, so endpoint defaults apply. Tool-choice and
+ * stop-sequence mapping stay cut.
  * @param options - the harness request (model, history, system, tools, sampling).
  * @param profile - the route's resolved profile, for refusal naming.
  * @param model - the resolved model the request addresses.
@@ -215,22 +424,42 @@ export function serializeRequest(
     messages.push({ role: dialect.systemRole, content: options.system })
   }
   messages.push(...serializeMessages(profile, model, options.messages, dialect))
-  const tools: WireTool[] | undefined = options.tools?.map(tool => ({
-    type: 'function',
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    },
-  }))
-  return {
-    model: options.model,
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    ...serializeThinking(thinking),
-    ...tools !== undefined && tools.length > 0 ? { tools } : {},
-    ...options.temperature !== undefined ? { temperature: options.temperature } : {},
-    ...options.maxTokens === undefined ? {} : { [dialect.maxTokensField]: options.maxTokens },
+  return requestWithMessages(options, messages, thinking, dialect)
+}
+
+/**
+ * Build one image-capable request while keeping durable bytes out of the
+ * request: over-budget history is offloaded to the fixed placeholder first —
+ * a pure function of history and bound, so omitted attachments are never
+ * read — and surviving images resolve through the attachment store as
+ * transient data URLs.
+ * @param options - the harness request (model, history, system, tools, sampling).
+ * @param profile - the route's resolved profile, for refusal naming.
+ * @param model - the resolved model the request addresses, for refusal naming.
+ * @param thinking - the dispatched reasoning selection.
+ * @param images - attachment resolver, request bound, and cancellation.
+ * @param dialect - the wire dialect; defaults to the protocol defaults until compat activation resolves one.
+ * @returns the fully materialized chat-completions request body.
+ */
+export async function serializeRequestWithImages(
+  options: GenerateOptions,
+  profile: ResolvedLlmAiProfile,
+  model: ResolvedModel,
+  thinking: ThinkingDispatch,
+  images: ImageSerializationOptions,
+  dialect: WireDialect = PROTOCOL_DEFAULT_DIALECT,
+): Promise<WireRequest> {
+  assertSupportedImageRoles(profile.provider, model.id, options.messages)
+  const requestMessages = offloadRequestImages(options.messages, images.maxRequestImageBytes)
+  const messages: WireMessage[] = []
+  if (options.system !== undefined) {
+    messages.push({ role: dialect.systemRole, content: options.system })
   }
+  messages.push(...await serializeMessagesWithImages(
+    requestMessages,
+    images.attachments,
+    images.signal,
+    dialect,
+  ))
+  return requestWithMessages(options, messages, thinking, dialect)
 }

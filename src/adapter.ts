@@ -7,7 +7,10 @@
  * The wire runtime is the harness-owned `openai-completions` dialect: one
  * `stream()` call makes exactly one provider request — a direct fetch against
  * the route's resolved `baseURL`, with the SSE response framed by
- * `eventsource-parser` and translated into harness stream chunks. Failures
+ * `eventsource-parser` and translated into harness stream chunks. Image input
+ * resolves durable attachments into transient base64 data URLs at request
+ * time, gated on the model's resolved modalities and the attachments seam,
+ * with over-budget history offloaded to the fixed placeholder first. Failures
  * classify into stable codes; the configured idle timeout bounds each
  * outstanding provider read without counting consumer think time.
  *
@@ -16,6 +19,7 @@
 
 import {
   attributionHeaders,
+  contentHasImage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   isContextWindowExceededError,
   isQuotaExceededError,
@@ -33,11 +37,12 @@ import type {
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { REASONING_LEVELS } from './catalog.ts'
 import type { ReasoningLevel, ResolvedModel } from './catalog.ts'
 import type { ResolvedLlmAiProfile } from './config.ts'
-import { dispatchReasoning, serializeRequest } from './serialize.ts'
+import { dispatchReasoning, serializeRequest, serializeRequestWithImages } from './serialize.ts'
 import type { ThinkingDispatch } from './serialize.ts'
 import { parseSse } from './sse.ts'
 import { translate } from './translate.ts'
@@ -72,6 +77,15 @@ export interface LlmAiAdapterOptions {
    * missing/invalid-credential refusals) without touching the request path.
    */
   resolveApiKey?: (profile: ResolvedLlmAiProfile) => MaybePromise<string | undefined>
+  /**
+   * Resolve the durable attachment service for one request's image input.
+   * Read per call, never captured at construction, so Cordis load order
+   * cannot freeze optional availability: a composition that loads the
+   * attachment store after this plugin still serves the next image request,
+   * and one without it keeps every text-only call working. Absence rejects
+   * image input while text-only requests never resolve the service.
+   */
+  resolveAttachments?: () => AttachmentStore | undefined
 }
 
 /** The profile for one route, or the not-owned failure. */
@@ -233,6 +247,24 @@ export class LlmAiAdapter extends LlmAdapter {
     // Reasoning dispatch refuses an unselectable level before any network
     // I/O, naming the route and model.
     const thinking = dispatchReasoning(profile, model, options.reasoningEffort)
+    // Image gate, still before any credential, attachment, or network I/O: a
+    // model whose resolved modalities omit image refuses the input outright,
+    // and an image-capable model needs the attachments seam on this call.
+    // Text-only requests resolve neither the service nor the bytes.
+    const hasImages = options.messages.some(message => contentHasImage(message.content))
+    let attachments: AttachmentStore | undefined
+    if (hasImages) {
+      if (!model.input.includes('image')) {
+        throw new LlmError(
+          `llm-ai: provider "${profile.provider}" model "${model.id}" does not accept image input`,
+          'UNSUPPORTED_CONTENT',
+        )
+      }
+      attachments = this.config.resolveAttachments?.()
+      if (attachments === undefined) {
+        throw new LlmError('llm-ai: image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+      }
+    }
     const apiKey = await (this.config.resolveApiKey ?? ambientApiKey)(profile)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -245,6 +277,7 @@ export class LlmAiAdapter extends LlmAdapter {
       model,
       thinking,
       apiKey,
+      attachments,
       watchdog.signal,
       () => { watchdog.pulse() },
     )[Symbol.asyncIterator]()
@@ -289,7 +322,8 @@ export class LlmAiAdapter extends LlmAdapter {
   /**
    * The one provider request of one stream call, as a chunk iterator: fetch,
    * status classification, and SSE translation. Transport teardown observes
-   * `signal`, which fuses the caller's abort with the idle watchdog.
+   * `signal`, which fuses the caller's abort with the idle watchdog and also
+   * cancels attachment reads on the image path.
    */
   private async * request(
     options: GenerateOptions,
@@ -297,11 +331,18 @@ export class LlmAiAdapter extends LlmAdapter {
     model: ResolvedModel,
     thinking: ThinkingDispatch,
     apiKey: string | undefined,
+    attachments: AttachmentStore | undefined,
     signal: AbortSignal,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
     const url = `${model.baseURL}/chat/completions`
-    const body = JSON.stringify(serializeRequest(options, profile, model, thinking))
+    const body = JSON.stringify(attachments === undefined
+      ? serializeRequest(options, profile, model, thinking)
+      : await serializeRequestWithImages(options, profile, model, thinking, {
+        attachments,
+        maxRequestImageBytes: profile.maxRequestImageBytes,
+        signal,
+      }))
     const headers = {
       ...profile.headers,
       ...attributionHeaders(),

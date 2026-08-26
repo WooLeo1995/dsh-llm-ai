@@ -172,7 +172,14 @@ export async function apply(ctx: Context, config: ConfigType): Promise<void> {
   }
   profiles()
 
-  const adapter = new LlmAiAdapter({ profiles })
+  const adapter = new LlmAiAdapter({
+    profiles,
+    // Resolved per call rather than injected: the attachment service is an
+    // optional composition fact, so a composition loading it after this
+    // plugin still serves image requests and one omitting it keeps text-only
+    // routes whole.
+    resolveAttachments: () => ctx.get('attachments'),
+  })
   // The full registry is configurable from the moment the plugin mounts —
   // dormant or not — so configuration surfaces can offer every models.dev
   // provider before any route exists. Hand-declared routes join it as
