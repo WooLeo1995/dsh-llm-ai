@@ -159,7 +159,7 @@ describe('snapshot mapping', () => {
     const catalog = catalogFromSnapshot(fixtureRegistry())
 
     expect(catalog.providers().map(provider => provider.id))
-      .toEqual(['deepseek', 'visionai', 'sketchy', 'capless', 'endpointless', 'bare', 'anthropic', 'google'])
+      .toEqual(['deepseek', 'visionai', 'sketchy', 'effortai', 'capless', 'endpointless', 'bare', 'anthropic', 'google'])
     const deepseek = catalog.provider('deepseek')
     expect(deepseek).toMatchObject({
       id: 'deepseek',
@@ -213,6 +213,30 @@ describe('snapshot mapping', () => {
     expect(odd?.maxTokens).toBeUndefined()
     // Fractional capacities are unusable, not rounded.
     expect(sketchy?.get('sketchy-fractional')?.contextWindow).toBeUndefined()
+  })
+
+  it('maps reasoning_options effort values to a canonical level set', () => {
+    const graded = catalogFromSnapshot(fixtureRegistry()).provider('effortai')?.models.get('effort-graded')
+    // `none` becomes a valueless off; every other level spells as itself.
+    expect(graded?.reasoningLevels).toEqual(new Map([
+      ['off', null],
+      ['low', 'low'],
+      ['high', 'high'],
+      ['max', 'max'],
+    ]))
+  })
+
+  it('filters non-canonical values out of the level set without failing the entry', () => {
+    const partial = catalogFromSnapshot(fixtureRegistry()).provider('effortai')?.models.get('effort-partial')
+    expect(partial?.reasoningLevels).toEqual(new Map([['medium', 'medium']]))
+    expect(partial?.reasoning).toBe(true)
+  })
+
+  it('states no level set for toggle, empty, absent, non-array, valueless, and unknown-only options', () => {
+    const models = catalogFromSnapshot(fixtureRegistry()).provider('effortai')?.models
+    for (const id of ['effort-toggle', 'effort-empty', 'effort-absent', 'effort-garbage', 'effort-valueless', 'effort-unknown']) {
+      expect(models?.get(id)?.reasoningLevels).toBeUndefined()
+    }
   })
 
   it('maps a model with no output limit as having no cap', () => {

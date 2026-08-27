@@ -53,6 +53,17 @@ export const REASONING_LEVELS = Object.keys(REASONING_LEVEL_GATE) as readonly (k
 export type ReasoningLevel = keyof typeof REASONING_LEVEL_GATE
 
 /**
+ * Whether a value names a canonical reasoning level at all — the check both
+ * registry mapping and request dispatch filter candidates through, so a value
+ * outside the vocabulary is dropped or refused instead of leaking to the wire.
+ * @param value - the candidate level name.
+ * @returns true when the value names one of {@link REASONING_LEVELS}.
+ */
+export function isReasoningLevel(value: string): value is ReasoningLevel {
+  return (REASONING_LEVELS as readonly string[]).includes(value)
+}
+
+/**
  * Selectable reasoning efforts for one model: each key is a level the model
  * offers (and selectors show), and its value is the wire spelling the request
  * sends for it. `off` alone may leave its value empty — "supported, send
@@ -174,10 +185,11 @@ export interface ModelProfile {
   input?: ModelModality[]
   /**
    * Selectable reasoning efforts. Absent inherits the registry entry's
-   * capability (a hand-declared model has none and does not reason); `false`
-   * declares a non-reasoning model, which is how a profile strips reasoning
-   * from a registry model its gateway cannot serve; a non-empty dict declares
-   * the offered levels and their wire spellings.
+   * capability — its `reasoning_options` level set when it states one, else
+   * the protocol's default set (a hand-declared model has neither and does
+   * not reason); `false` declares a non-reasoning model, which is how a
+   * profile strips reasoning from a registry model its gateway cannot serve;
+   * a non-empty dict declares the offered levels and their wire spellings.
    */
   reasoningEfforts?: false | ReasoningEfforts
   /** Wire-compatibility switches for this model, winning over the route's per field. */
@@ -278,13 +290,14 @@ function declaredInput(configured: readonly ModelModality[] | undefined): readon
 /**
  * Resolve one model's reasoning efforts from its declaration.
  *
- * An absent declaration inherits the registry entry's capability — `true`
- * gets the protocol's default level set, `false` gets none — because a bare
- * capability flag with no spellings is exactly what the default set is for.
- * A declared dict pins every level explicitly: declared levels carry their
- * wire spelling and undeclared canonical levels are simply not offered. A
- * declared `off` with no value stays in the map as `null` ("supported, send
- * nothing") while `off` with a value sends that value.
+ * An absent declaration inherits the registry entry's capability: `true` gets
+ * the level set the registry's `reasoning_options` states — the model's own
+ * vocabulary — or, when the entry states none (toggle, empty, absent, or all
+ * values outside the canonical vocabulary), the protocol's default set;
+ * `false` gets none. A declared dict pins every level explicitly: declared
+ * levels carry their wire spelling and undeclared canonical levels are simply
+ * not offered. A declared `off` with no value stays in the map as `null`
+ * ("supported, send nothing") while `off` with a value sends that value.
  */
 function resolveModelReasoning(
   provider: string,
@@ -294,6 +307,7 @@ function resolveModelReasoning(
   const efforts = entry.reasoningEfforts
   if (efforts === undefined) {
     if (base?.reasoning !== true) return new Map()
+    if (base.reasoningLevels !== undefined) return new Map(base.reasoningLevels)
     return new Map(Object.entries(DEFAULT_REASONING_EFFORTS) as [ReasoningLevel, string | null][])
   }
   if (efforts === false) return new Map()

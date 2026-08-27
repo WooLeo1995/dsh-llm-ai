@@ -30,7 +30,7 @@ dsh plugin --profile <name> add dsh-llm-ai
 - **openai-completions 运行时**：流式 SSE（eventsource-parser）、文本、工具调用（raw-string 参数）、reasoning 分级、图片输入 + `maxRequestImageBytes` 超限最旧先行卸载、usage / 缓存命中记账、空闲看门狗（`streamIdleTimeoutMs`）、单次 `stream()` 恰好一次请求。
 - **稳定错误码**：`AUTH` / `QUOTA` / `RATE_LIMIT` / `CONTEXT_WINDOW_EXCEEDED` / `INVALID_REQUEST` / `SERVER` / `HTTP_<n>` / `TRANSPORT` / `TIMEOUT` / `ABORTED` / `STREAM_CLOSED` / `MALFORMED_RESPONSE` / `EMPTY_RESPONSE`（可重试分类）。
 - **compat 开关**：`maxTokensField` / `supportsDeveloperRole` / `thinkingFormat`（`openai` | `deepseek` | `openrouter`），按 **模型 → 路由 → 协议默认** 逐字段解析；未知键、无值键一律拒绝并列出可选集，绝不静默丢弃。
-- **reasoning 声明**：`reasoningEfforts` 映射"可选级别 → wire 拼写"；`off` 三态（不声明=不可选；声明无值=发 disabled 拼写；带值=按值发送）；未声明级别在 I/O 前拒绝。
+- **reasoning 声明**：`reasoningEfforts` 映射"可选级别 → wire 拼写"；`off` 三态（不声明=不可选；声明无值=发 disabled 拼写；带值=按值发送）；未声明级别在 I/O 前拒绝。未声明时，注册表模型的可选级别取自 models.dev `reasoning_options` 的 effort 值（各级别按自身拼写上 wire；`none` → 无值 `off`）；`toggle`、空、缺失或全为非规范值的 options 保持协议默认集（`off`/`low`/`medium`/`high`）；profile 声明仍可整体重塑两者。
 - **动态配置**：`providers` 字典 + settings 段热合并（下一个请求生效，无需重启）；休眠挂载（无 providers 时零路由）；路由集变更原子重注册。
 - **凭证**：只存 `apiKeyEnv` 引用；逐请求经 credentials seam → 受信环境解析；格式校验（`INVALID_CREDENTIAL`）、引用落空（`MISSING_CREDENTIAL`）都点名路由与全部配置入口，永不泄露密钥内容。
 - **端点探测**：手工声明网关的 `GET /models` 询问（4 MiB 实收字节上限、手输草稿密钥优先、`DISCOVERY_*` 错误码族）。

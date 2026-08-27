@@ -770,6 +770,31 @@ describe('reasoning dispatch', () => {
     })
   })
 
+  it('dispatches registry-stated levels with the level-name spelling', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }, { kind: 'sse', events: textEvents }])
+    const ctx = await harness({ effortai: route(server.url) })
+
+    await chunksOf(ctx, {
+      ...call,
+      provider: 'effortai',
+      model: 'effort-graded',
+      reasoningEffort: ReasoningEffortId('max'),
+    })
+    expect(server.requests[0]).toMatchObject({
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'max',
+    })
+    // The registry's `none` mapped to a valueless off: the disabled spelling.
+    await chunksOf(ctx, {
+      ...call,
+      provider: 'effortai',
+      model: 'effort-graded',
+      reasoningEffort: ReasoningEffortId('off'),
+    })
+    expect(server.requests[1]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
+  })
+
   it('sends the disabled spelling for valueless off and omits the effort parameter', async () => {
     const { ctx, server } = await wireHarness(
       [{ kind: 'sse', events: textEvents }],

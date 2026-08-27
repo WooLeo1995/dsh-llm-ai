@@ -2,8 +2,9 @@
  * models.dev catalog loader: the single provider/model metadata source this
  * adapter reads. The community-maintained [models.dev](https://models.dev)
  * registry (`api.json`) supplies provider base URLs and display names plus
- * per-model context windows, output caps, input modalities, and reasoning
- * capability — everything a route needs except the credential, which the
+ * per-model context windows, output caps, input modalities, reasoning
+ * capability, and the selectable reasoning levels `reasoning_options`
+ * states — everything a route needs except the credential, which the
  * profile names by reference.
  *
  * The registry is fetched once at plugin load and cached to disk under the
@@ -20,6 +21,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { ModelModality } from '@deepseek-ai/dsh-llm'
+import { isReasoningLevel } from './catalog.ts'
+import type { ReasoningLevel } from './catalog.ts'
 import { withheldProtocol } from './provider.ts'
 
 /** Default registry endpoint. */
@@ -48,6 +51,8 @@ export interface ModelsDevProvider {
 export interface ModelsDevModel {
   name?: unknown
   reasoning?: unknown
+  /** Structured reasoning selectors the registry states, when it states any. */
+  reasoning_options?: unknown
   modalities?: { input?: unknown; output?: unknown }
   limit?: { context?: unknown; output?: unknown; input?: unknown }
 }
@@ -76,6 +81,15 @@ export interface RegistryModel {
   name: string
   /** Whether the registry marks the model as reasoning-capable. */
   reasoning: boolean
+  /**
+   * The selectable reasoning levels the registry's `reasoning_options`
+   * states, mapped to canonical level names keyed to their wire spellings
+   * (each regular level spells as itself; the registry's `none` becomes a
+   * valueless `off`). Absent when the entry states no servable set — a
+   * `toggle`, empty or absent options, or values that all fall outside the
+   * canonical vocabulary — leaving the protocol's default set to answer.
+   */
+  reasoningLevels?: ReadonlyMap<ReasoningLevel, string | null>
   /** Request modalities the registry records, floored at text. */
   input: readonly ModelModality[]
   /** Maximum combined request and response context, when the registry states one. */
@@ -120,12 +134,42 @@ function label(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+/**
+ * The reasoning level set one registry entry's `reasoning_options` states.
+ *
+ * Only an `effort` entry carrying canonical level names yields a set; each
+ * regular level spells as itself on the wire, while the registry's `none`
+ * becomes a valueless `off` (selectable off; the wire sends the dialect's
+ * disabled spelling). Every other shape — `toggle`, an empty or absent array,
+ * a non-array field, or values that all fall outside the canonical
+ * vocabulary — states no set, so `undefined` hands the protocol's default
+ * back to resolution. Filtering is never fatal: a registry entry carrying
+ * unknown values must not fail the route or the directory.
+ * @param raw - the entry's `reasoning_options` field, as the registry wrote it.
+ * @returns the mapped level set, or `undefined` when the entry states none.
+ */
+function reasoningOptions(raw: unknown): ReadonlyMap<ReasoningLevel, string | null> | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const effort = raw.find(
+    (entry): entry is { values?: unknown } =>
+      typeof entry === 'object' && entry !== null && (entry as { type?: unknown }).type === 'effort',
+  )
+  if (effort === undefined) return undefined
+  const levels = new Map<ReasoningLevel, string | null>()
+  for (const value of Array.isArray(effort.values) ? effort.values : []) {
+    if (value === 'none') levels.set('off', null)
+    else if (typeof value === 'string' && isReasoningLevel(value)) levels.set(value, value)
+  }
+  return levels.size > 0 ? levels : undefined
+}
+
 /** Map one models.dev model entry to a {@link RegistryModel}. */
 function toRegistryModel(id: string, raw: ModelsDevModel): RegistryModel {
   const input = raw.modalities?.input
   const hasImage = Array.isArray(input) && input.includes('image')
   const contextWindow = capacity(raw.limit?.context)
   const maxTokens = capacity(raw.limit?.output)
+  const reasoningLevels = reasoningOptions(raw.reasoning_options)
   return {
     id,
     name: label(raw.name) ?? id,
@@ -133,6 +177,7 @@ function toRegistryModel(id: string, raw: ModelsDevModel): RegistryModel {
     input: hasImage ? ['text', 'image'] : ['text'],
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
+    ...reasoningLevels === undefined ? {} : { reasoningLevels },
   }
 }
 

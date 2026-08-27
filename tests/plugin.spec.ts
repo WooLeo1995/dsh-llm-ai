@@ -439,6 +439,65 @@ describe('reasoning declarations', () => {
   })
 })
 
+describe('registry reasoning levels', () => {
+  it('serves the registry-stated level set as the model default offer', async () => {
+    const { ctx } = await harness({ providers: { effortai: {} } })
+
+    expect(await ctx.llm.resolveModelInfo('effortai', 'effort-graded')).toMatchObject({
+      reasoning: {
+        efforts: [
+          { id: 'off', name: 'Off' },
+          { id: 'low', name: 'Low' },
+          { id: 'high', name: 'High' },
+          { id: 'max', name: 'Max' },
+        ],
+      },
+    })
+  })
+
+  it('keeps the protocol default set for toggle, empty, absent, and unknown-only options', async () => {
+    const { ctx } = await harness({ providers: { effortai: {} } })
+
+    for (const id of ['effort-toggle', 'effort-empty', 'effort-absent', 'effort-unknown']) {
+      expect(await ctx.llm.resolveModelInfo('effortai', id)).toMatchObject({
+        reasoning: {
+          efforts: [
+            { id: 'off', name: 'Off' },
+            { id: 'low', name: 'Low' },
+            { id: 'medium', name: 'Medium' },
+            { id: 'high', name: 'High' },
+          ],
+        },
+      })
+    }
+  })
+
+  it('offers a route-configured default level the registry set carries', async () => {
+    const { ctx } = await harness({ providers: { effortai: { reasoning: 'max' } } })
+    expect(await ctx.llm.resolveModelInfo('effortai', 'effort-graded')).toMatchObject({
+      reasoning: { defaultEffort: 'max' },
+    })
+  })
+
+  it('ignores a level set the capability flag does not back', async () => {
+    const { ctx } = await harness({ providers: { effortai: {} } })
+    expect((await ctx.llm.resolveModelInfo('effortai', 'effort-mute')).reasoning).toBeUndefined()
+  })
+
+  it('still lets a declaration reshape or strip the registry-stated set', async () => {
+    const reshaped = await harness({
+      providers: { effortai: { models: [{ id: 'effort-graded', reasoningEfforts: { low: 'low' } }] } },
+    })
+    expect(await reshaped.ctx.llm.resolveModelInfo('effortai', 'effort-graded')).toMatchObject({
+      reasoning: { efforts: [{ id: 'low', name: 'Low' }] },
+    })
+    const stripped = await harness({
+      providers: { effortai: { models: [{ id: 'effort-graded', reasoningEfforts: false }] } },
+    })
+    expect((await stripped.ctx.llm.resolveModelInfo('effortai', 'effort-graded')).reasoning).toBeUndefined()
+  })
+})
+
 describe('protocol table', () => {
   it('exposes exactly one supported protocol', () => {
     expect(supportedProtocols()).toEqual(['openai-completions'])

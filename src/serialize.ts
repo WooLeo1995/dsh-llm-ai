@@ -12,8 +12,8 @@ import { contentHasImage, LlmError, offloadRequestImages } from '@deepseek-ai/ds
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { REASONING_LEVELS } from './catalog.ts'
-import type { CompatProfile, MaxTokensField, ReasoningLevel, ResolvedModel, ThinkingFormat } from './catalog.ts'
+import { isReasoningLevel } from './catalog.ts'
+import type { CompatProfile, MaxTokensField, ResolvedModel, ThinkingFormat } from './catalog.ts'
 import type { ResolvedLlmAiProfile } from './config.ts'
 import type {
   WireImageContentPart,
@@ -78,17 +78,6 @@ export type ThinkingDispatch =
   | { state: 'none' }
   | { state: 'disabled' }
   | { state: 'enabled'; effort: string }
-
-/**
- * Whether a requested effort is one of the canonical levels at all. A value
- * outside the vocabulary can never be declared, so it fails dispatch like an
- * undeclared level instead of leaking to the wire.
- * @param value - the requested effort id.
- * @returns true when the value names a canonical reasoning level.
- */
-function isReasoningLevel(value: string): value is ReasoningLevel {
-  return (REASONING_LEVELS as readonly string[]).includes(value)
-}
 
 /**
  * Dispatch one request's reasoning effort through a model's resolved

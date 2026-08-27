@@ -63,11 +63,14 @@ export function withheldProtocol(provider: string): string | undefined {
 
 /**
  * The reasoning efforts a registry model offers when its entry declares
- * `reasoning: true` and no declaration reshapes them: the
- * `openai-completions` protocol's own effort vocabulary, each level spelled
- * as itself on the wire, with `off` sending nothing (for most endpoints not
- * thinking is the parameter's absence). A `reasoningEfforts` declaration
- * replaces this set; `false` strips reasoning entirely.
+ * `reasoning: true` but its `reasoning_options` states no set of its own
+ * (toggle, empty, absent, or all values outside the canonical vocabulary),
+ * and no declaration reshapes them: the `openai-completions` protocol's own
+ * effort vocabulary, each level spelled as itself on the wire, with `off`
+ * sending nothing (for most endpoints not thinking is the parameter's
+ * absence). A registry-stated level set replaces this blanket default for
+ * that model; a `reasoningEfforts` declaration replaces either; `false`
+ * strips reasoning entirely.
  */
 export const DEFAULT_REASONING_EFFORTS: Readonly<Record<'off' | 'low' | 'medium' | 'high', string | null>> = {
   off: null,

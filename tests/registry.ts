@@ -59,8 +59,9 @@ export function model(overrides: Record<string, unknown> = {}): Record<string, u
 /**
  * The fixture snapshot: `deepseek` resolves cleanly bare, `visionai` carries
  * image modality, `sketchy` holds unsized and garbage-field models (its bare
- * route is the capacity refusal), `endpointless` has models but no endpoint,
- * and the withheld families (`anthropic`, `google`) round it out.
+ * route is the capacity refusal), `effortai` holds every `reasoning_options`
+ * shape the live registry survey observed, `endpointless` has models but no
+ * endpoint, and the withheld families (`anthropic`, `google`) round it out.
  */
 export function fixtureRegistry(): Record<string, ModelsDevProvider> {
   return {
@@ -104,6 +105,50 @@ export function fixtureRegistry(): Record<string, ModelsDevProvider> {
           limit: { context: 'big', output: -5 },
         }),
         'sketchy-fractional': model({ name: 'Sketchy Fractional', limit: { context: 1.5, output: 100 } }),
+      },
+    }),
+    // Every reasoning_options shape: effort values (with `none` mapping to a
+    // valueless off, and unknown values filtered), toggle, empty, absent,
+    // non-array, an effort entry with no values, all-unknown values, and a
+    // set the capability flag does not back.
+    effortai: provider({
+      id: 'effortai',
+      name: 'Effort AI',
+      env: ['EFFORTAI_API_KEY'],
+      api: 'https://api.effortai.example/v1',
+      models: {
+        'effort-graded': model({
+          name: 'Effort Graded',
+          reasoning: true,
+          reasoning_options: [{ type: 'effort', values: ['none', 'low', 'high', 'max'] }],
+        }),
+        'effort-partial': model({
+          name: 'Effort Partial',
+          reasoning: true,
+          reasoning_options: [{ type: 'effort', values: ['medium', 'warp9', 7] }],
+        }),
+        'effort-toggle': model({
+          name: 'Effort Toggle',
+          reasoning: true,
+          reasoning_options: [{ type: 'toggle' }],
+        }),
+        'effort-empty': model({ name: 'Effort Empty', reasoning: true, reasoning_options: [] }),
+        'effort-absent': model({ name: 'Effort Absent', reasoning: true }),
+        'effort-garbage': model({ name: 'Effort Garbage', reasoning: true, reasoning_options: 42 }),
+        'effort-valueless': model({
+          name: 'Effort Valueless',
+          reasoning: true,
+          reasoning_options: [{ type: 'effort' }],
+        }),
+        'effort-unknown': model({
+          name: 'Effort Unknown',
+          reasoning: true,
+          reasoning_options: [{ type: 'effort', values: ['turbo', 'ultra'] }],
+        }),
+        'effort-mute': model({
+          name: 'Effort Mute',
+          reasoning_options: [{ type: 'effort', values: ['low'] }],
+        }),
       },
     }),
     // Context but no output limit: the model serves with no output cap.
