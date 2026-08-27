@@ -8,6 +8,22 @@
 - **验证状态**：205+ 单元测试、逐文件 100% 覆盖；已在 DSH Desktop 2.0.3（dsh 0.1.1-rc.2 全家桶）上完成完整替换部署并日常使用。
 - **版本基线**：面向 `@deepseek-ai/*@next`（0.1.1-rc.2 系列）开发，peer 兼容同代版本。
 
+## npm 安装
+
+以非域名包名 `dsh-llm-ai` 发布（`@deepseek-ai/dsh-llm-ai` 是 harness 主仓库的集成态孪生）。官方 CLI 一条命令：
+
+```sh
+dsh plugin --profile <name> add dsh-llm-ai
+```
+
+安装即挂载：CLI 在 profile 目录转发 `pnpm add`，识别包内 `dsh.bundle.patch` 声明后自动追加进 `dsh.profile.bundles` 层栈，profile 启动时合并随包补丁——禁用内置的 `llm-pi-ai` 挂载并插入 `llm-ai`（两个适配器不能并存：可配置目录按全局 id 键控，同目录 id 双双声明会在加载时 `DUPLICATE_DIRECTORY` 失败）。
+
+注意：
+
+- 从手工挂载迁移：删掉 profile 自己 `cordis.patch.yml` 里旧的 `llm-ai` 插入行和 `llm-pi-ai` 禁用行，避免条目 id 重复。
+- 内置 UI 的构建（早于 llm-ai 迁移的 DSH Desktop / web-app 版本）在 Models 页硬编码 `llm-pi-ai` 命名空间——对安装副本 `<profile>/node_modules/dsh-llm-ai/lib/index.js` 打"部署第 4 步"的单字符串别名补丁。
+- 供应商配置写入 `llm-ai:` settings 段（见配置参考）；凭证引用无需迁移。
+
 ## 功能特性
 
 - **models.dev 目录**：插件加载时拉取 `api.json` 一次，磁盘缓存于 DSH home（`storages/models-dev-cache.json`）；离线时使用最后一次成功快照；仅当无缓存且拉取失败才响亮报错。`catalogUrl` / `catalogCachePath` 可覆盖。
@@ -189,6 +205,7 @@ pnpm install
 npx tsc --noEmit        # 类型检查
 npx vitest run          # 全部测试（204+，无网络依赖）
 npx vitest run --coverage  # 逐文件 100% 覆盖门禁
+pnpm run build          # tsdown：产出 lib/ 运行时 bundle 与类型声明
 ```
 
 设计决策的完整记录见部署源仓库的 `.scratch/llm-ai/`（spec + 12 张票的 Resolution）；harness 主仓库的 `packages/llm/llm-ai` 是集成态孪生（含仓库门禁与文档再生成）。本目录是发布与独立开发的源头。

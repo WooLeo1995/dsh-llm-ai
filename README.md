@@ -8,6 +8,22 @@ A models.dev-cataloged multi-provider LLM adapter for the DeepSeek Harness: ever
 - **Verification status**: 205+ unit tests at per-file 100% coverage; deployed as a complete replacement on DSH Desktop 2.0.3 (the dsh 0.1.1-rc.2 family) and in daily use.
 - **Version baseline**: developed against `@deepseek-ai/*@next` (the 0.1.1-rc.2 line); peers are compatible with the same generation.
 
+## Install (npm)
+
+Published as the unscoped package `dsh-llm-ai` (the `@deepseek-ai/dsh-llm-ai` name is the harness monorepo's integrated twin). With the official CLI:
+
+```sh
+dsh plugin --profile <name> add dsh-llm-ai
+```
+
+One command installs and mounts: the CLI forwards to `pnpm add` in the profile directory, sees this package's `dsh.bundle.patch` declaration, appends it to the `dsh.profile.bundles` layer stack, and the profile boot merges the bundled patch — which disables the bundled `llm-pi-ai` mount and inserts `llm-ai` (the two adapters cannot coexist: the configurable-provider directory keys provider ids globally and both declaring the same catalog id fails `DUPLICATE_DIRECTORY` at load).
+
+Notes:
+
+- Migrating from a manual mount: remove the old `llm-ai` insert and `llm-pi-ai` disable lines from the profile's own `cordis.patch.yml` to avoid a duplicate entry id.
+- Bundled-UI builds (DSH Desktop / web-app releases predating the llm-ai migration) hardcode the `llm-pi-ai` namespace in their Models page — apply the single-string alias documented under Deployment, step 4, to the installed copy at `<profile>/node_modules/dsh-llm-ai/lib/index.js`.
+- Provider profiles live in the `llm-ai:` settings section (see the configuration reference); credential references need no migration.
+
 ## Features
 
 - **models.dev catalog**: `api.json` is fetched once at plugin load and cached to disk under the DSH home (`storages/models-dev-cache.json`); offline boots serve the last good snapshot; a fetch failure is loud only when nothing is cached. `catalogUrl` / `catalogCachePath` override the endpoint and cache location.
@@ -197,6 +213,7 @@ pnpm install
 npx tsc --noEmit        # typecheck
 npx vitest run          # the whole suite (204+, no network)
 npx vitest run --coverage  # per-file 100% coverage gate
+pnpm run build          # tsdown: lib/ runtime bundle + declarations
 ```
 
 The complete decision record lives in the deployment source repository under `.scratch/llm-ai/` (the spec plus twelve ticket resolutions); the harness monorepo's `packages/llm/llm-ai` is the integrated twin (with repo gates and doc regeneration). This directory is the origin for publication and standalone development.

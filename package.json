@@ -1,48 +1,76 @@
 {
-  "name": "@deepseek-ai/dsh-llm-ai",
+  "name": "dsh-llm-ai",
   "description": "models.dev-cataloged multi-provider LLM adapter for the DeepSeek Harness LLM seam",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "license": "MIT",
-  "main": "src/index.ts",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./src/*": "./src/*",
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
     "./package.json": "./package.json"
   },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "build": "tsdown && node scripts/fix-dts-names.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "next",
-    "@deepseek-ai/dsh-attachment": "next",
-    "@deepseek-ai/dsh-credentials": "next",
-    "@deepseek-ai/dsh-llm": "next",
-    "@deepseek-ai/dsh-settings": "next",
-    "@deepseek-ai/dsh-timeout": "next"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-attachment": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-credentials": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-timeout": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-home-paths": "next",
-    "@deepseek-ai/dsh-launch-environment": "next",
-    "@deepseek-ai/schemastery": "next",
+    "@deepseek-ai/dsh-home-paths": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "^0.1.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "eventsource-parser": "^3.1.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "next",
-    "@deepseek-ai/dsh-attachment": "next",
-    "@deepseek-ai/dsh-credentials": "next",
-    "@deepseek-ai/dsh-credentials-local": "next",
-    "@deepseek-ai/dsh-llm": "next",
-    "@deepseek-ai/dsh-settings": "next",
-    "@deepseek-ai/dsh-settings-file": "next",
-    "@deepseek-ai/dsh-timeout": "next",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-attachment": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-credentials": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-credentials-local": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-settings-file": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-timeout": "^0.1.1-rc.2",
     "@types/node": "^22.19.0",
     "@vitest/coverage-v8": "^4.1.11",
+    "tsdown": "^0.14.0",
     "typescript": "^5.9.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "repository": {
     "type": "git",
