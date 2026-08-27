@@ -43,5 +43,9 @@
     "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^5.9.0",
     "vitest": "^4.1.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WooLeo1995/dsh-llm-ai.git"
   }
 }
