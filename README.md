@@ -1,62 +1,65 @@
 # dsh-llm-ai
 
-基于 [models.dev](https://models.dev) 目录的 DeepSeek Harness 多供应商 LLM 适配器插件：供应商与模型元数据全部来自社区维护的 `api.json` 注册表，请求运行时为自研的 `openai-completions` 流式实现（direct fetch + SSE），不依赖 pi-ai。它是 `dsh-llm-pi-ai` 的替代品，挂载在同一 `ctx.llm` 接缝上。
+English | [中文](README.zh.md)
 
-- **协议支持**：v1 仅 `openai-completions`（覆盖绝大多数 OpenAI 兼容端点）；`anthropic-messages` 等留待 v2。
-- **验证状态**：205+ 单元测试、逐文件 100% 覆盖；已在 DSH Desktop 2.0.3（dsh 0.1.1-rc.2 全家桶）上完成完整替换部署并日常使用。
-- **版本基线**：面向 `@deepseek-ai/*@next`（0.1.1-rc.2 系列）开发，peer 兼容同代版本。
+A models.dev-cataloged multi-provider LLM adapter for the DeepSeek Harness: every provider and model fact comes from the community-maintained [models.dev](https://models.dev) `api.json` registry, and the request runtime is a harness-owned `openai-completions` streaming implementation (direct fetch + SSE) with no pi-ai dependency. It replaces `dsh-llm-pi-ai` on the same `ctx.llm` seam.
 
-## 功能特性
+- **Protocol support**: v1 serves `openai-completions` only (the overwhelming majority of OpenAI-compatible endpoints); `anthropic-messages` and other protocols are v2 work.
+- **Verification status**: 205+ unit tests at per-file 100% coverage; deployed as a complete replacement on DSH Desktop 2.0.3 (the dsh 0.1.1-rc.2 family) and in daily use.
+- **Version baseline**: developed against `@deepseek-ai/*@next` (the 0.1.1-rc.2 line); peers are compatible with the same generation.
 
-- **models.dev 目录**：插件加载时拉取 `api.json` 一次，磁盘缓存于 DSH home（`storages/models-dev-cache.json`）；离线时使用最后一次成功快照；仅当无缓存且拉取失败才响亮报错。`catalogUrl` / `catalogCachePath` 可覆盖。
-- **openai-completions 运行时**：流式 SSE（eventsource-parser）、文本、工具调用（raw-string 参数）、reasoning 分级、图片输入 + `maxRequestImageBytes` 超限最旧先行卸载、usage / 缓存命中记账、空闲看门狗（`streamIdleTimeoutMs`）、单次 `stream()` 恰好一次请求。
-- **稳定错误码**：`AUTH` / `QUOTA` / `RATE_LIMIT` / `CONTEXT_WINDOW_EXCEEDED` / `INVALID_REQUEST` / `SERVER` / `HTTP_<n>` / `TRANSPORT` / `TIMEOUT` / `ABORTED` / `STREAM_CLOSED` / `MALFORMED_RESPONSE` / `EMPTY_RESPONSE`（可重试分类）。
-- **compat 开关**：`maxTokensField` / `supportsDeveloperRole` / `thinkingFormat`（`openai` | `deepseek` | `openrouter`），按 **模型 → 路由 → 协议默认** 逐字段解析；未知键、无值键一律拒绝并列出可选集，绝不静默丢弃。
-- **reasoning 声明**：`reasoningEfforts` 映射"可选级别 → wire 拼写"；`off` 三态（不声明=不可选；声明无值=发 disabled 拼写；带值=按值发送）；未声明级别在 I/O 前拒绝。
-- **动态配置**：`providers` 字典 + settings 段热合并（下一个请求生效，无需重启）；休眠挂载（无 providers 时零路由）；路由集变更原子重注册。
-- **凭证**：只存 `apiKeyEnv` 引用；逐请求经 credentials seam → 受信环境解析；格式校验（`INVALID_CREDENTIAL`）、引用落空（`MISSING_CREDENTIAL`）都点名路由与全部配置入口，永不泄露密钥内容。
-- **端点探测**：手工声明网关的 `GET /models` 询问（4 MiB 实收字节上限、手输草稿密钥优先、`DISCOVERY_*` 错误码族）。
-- **可配置目录**：向配置界面声明全部 203 家 models.dev 供应商（含暂不可服务的家族，附诚实元数据）。
+## Features
 
-## 配置参考
+- **models.dev catalog**: `api.json` is fetched once at plugin load and cached to disk under the DSH home (`storages/models-dev-cache.json`); offline boots serve the last good snapshot; a fetch failure is loud only when nothing is cached. `catalogUrl` / `catalogCachePath` override the endpoint and cache location.
+- **openai-completions runtime**: streaming SSE (eventsource-parser), text, tool calls with raw-string arguments, tiered reasoning, image input with oldest-first offload under `maxRequestImageBytes`, usage and cache-hit accounting, an idle watchdog (`streamIdleTimeoutMs`), and exactly one provider request per `stream()` call.
+- **Stable error codes**: `AUTH` / `QUOTA` / `RATE_LIMIT` / `CONTEXT_WINDOW_EXCEEDED` / `INVALID_REQUEST` / `SERVER` / `HTTP_<n>` / `TRANSPORT` / `TIMEOUT` / `ABORTED` / `STREAM_CLOSED` / `MALFORMED_RESPONSE` / `EMPTY_RESPONSE` (retryable classification).
+- **Compat switches**: `maxTokensField` / `supportsDeveloperRole` / `thinkingFormat` (`openai` | `deepseek` | `openrouter`), resolved per field **model → route → protocol default**; unknown and valueless keys are refused listing the offered set — nothing is silently dropped.
+- **Reasoning declarations**: `reasoningEfforts` maps each selectable level to its wire spelling; `off` is tri-state (absent = not offered; declared without a value = send the disabled spelling; declared with a value = send it); an undeclared level is refused before any network I/O.
+- **Dynamic configuration**: the `providers` dict merges with the user settings section per provider, effective on the next request without a restart; dormant mounting (zero routes with no providers); atomic re-registration when the route set changes.
+- **Credentials**: configuration stores `apiKeyEnv` references only; each request resolves them through the credentials seam, then the trusted environment; format checks (`INVALID_CREDENTIAL`) and empty references (`MISSING_CREDENTIAL`) name the route and every configuration entry point and never any part of the key.
+- **Endpoint interrogation**: `GET /models` discovery for hand-declared gateways (a 4 MiB received-bytes ceiling, a typed draft key winning over stored references, and the `DISCOVERY_*` error family).
+- **Configurable-provider directory**: declares all 203 models.dev providers to configuration surfaces (including families it cannot yet serve, with honest metadata).
 
-cordis 组合条目：
+## Configuration reference
+
+Cordis composition entry:
 
 ```yaml
 - id: llm-ai
   name: '@deepseek-ai/dsh-llm-ai'
-  # config 省略时休眠挂载（零路由），settings 段可随时激活路由
+  # Omitting config mounts dormant (zero routes); a settings section can
+  # activate routes at any time.
   config:
-    catalogUrl: https://models.dev/api.json      # 可选：自建镜像
-    catalogCachePath: /path/to/cache.json        # 可选：缓存位置
+    catalogUrl: https://models.dev/api.json      # optional: self-hosted mirror
+    catalogCachePath: /path/to/cache.json        # optional: cache location
     providers:
-      openai:                    # 目录路由：端点/协议/模型全部继承 models.dev
-        apiKeyEnv: OPENAI_API_KEY
-      zai-coding-cn:             # 手工路由：必须显式 api + baseURL + 非空 models
-        apiKeyEnv: ZAI_CODING_CN_API_KEY
+      openai:                    # Catalog route: endpoint, protocol, and models
+        apiKeyEnv: OPENAI_API_KEY    # all inherited from models.dev.
+      zai-coding-cn:             # Hand-declared route: api + baseURL + a
+        apiKeyEnv: ZAI_CODING_CN_API_KEY   # non-empty models list are required.
         api: openai-completions
         baseURL: https://open.bigmodel.cn/api/coding/paas/v4
         models:
           - { id: glm-5.3, contextWindow: 1000000, maxTokens: 131072 }
 ```
 
-providers 路由字段：`apiKeyEnv`（凭证引用）、`displayName`、`api`（v1 仅 `openai-completions`）、`baseURL`、`models`（**整体替换**该路由目录，未写字段从注册表同名条目取默认）、`modelOverrides`（只改单个模型、其余目录照常服务）、`compat`（三开关）、`reasoning`（部署默认级别）、`retryPolicy`（省略=常规模式重试 5 次）、`headers`、`defaultContextWindow` / `defaultMaxTokens` / `defaultInput`（仅对未声明容量的配置条目兜底）、`streamIdleTimeoutMs`（默认 5 分钟）、`maxRequestImageBytes`（默认 20 MiB）。
+Provider profile fields: `apiKeyEnv` (credential reference), `displayName`, `api` (`openai-completions` only in v1), `baseURL`, `models` (**replaces** the route's catalog; unset fields default from the registry entry of the same id), `modelOverrides` (reshapes individual models while the rest of the catalog keeps serving), `compat` (the three switches), `reasoning` (the deployment default level), `retryPolicy` (omission = normal mode with five retries), `headers`, `defaultContextWindow` / `defaultMaxTokens` / `defaultInput` (fallbacks for configured entries that state no capacity), `streamIdleTimeoutMs` (five-minute default), `maxRequestImageBytes` (20 MiB default).
 
-目录解析要点：models.dev 模型**无上下文窗口则拒绝**（不猜测）；`modelOverrides` 指向目录不存在的模型会拒绝；`timeoutMs` 已删除（原属 pi-ai 运行时语义），配置了会得到带迁移指引的报错。
+Catalog resolution notes: a models.dev model with no context window is refused rather than guessed; a `modelOverrides` key naming a model the catalog does not describe is refused; `timeoutMs` is gone (it named pi-ai runtime behavior) and configuring it fails with migration directions.
 
-## DSH Desktop 部署（完整操作流程）
+## DSH Desktop deployment (the complete procedure)
 
-以下是经实际验证的完整部署路径（在 DSH Desktop 2.0.3 / dsh 0.1.1-rc.2 上执行）。桌面版通过 `~/.dsh/profiles/desktop/` 的 pnpm 迷你工作区加载插件，**无需改动 .app 本体**。
+The following is the verified deployment path (executed on DSH Desktop 2.0.3 / dsh 0.1.1-rc.2). The desktop loads plugins through the pnpm mini-workspace at `~/.dsh/profiles/desktop/` — **the .app bundle itself is never modified**.
 
-### 1. 构建自足安装目录
+### 1. Build a self-sufficient install directory
 
 ```sh
 mkdir -p ~/Downloads/project/github/dsh-llm-ai-app
-# 从 harness 仓库取构建产物（tsc lib/types + 打包 runtime）
+# Take the build outputs from the harness repo (tsc lib/types + bundled runtime)
 cp -R <harness>/packages/llm/llm-ai/lib ~/Downloads/project/github/dsh-llm-ai-app/
 ```
 
-安装目录的 `package.json`：插件本体 + 全部 peer 按 npm `@next` 作为**实依赖**安装（自足，vibe-island 模式）：
+The install directory's `package.json` declares the plugin plus every peer as a **real** dependency from npm's `@next` dist-tag (self-sufficient, the vibe-island pattern):
 
 ```json
 {
@@ -85,12 +88,12 @@ cp -R <harness>/packages/llm/llm-ai/lib ~/Downloads/project/github/dsh-llm-ai-ap
 
 ```sh
 cd ~/Downloads/project/github/dsh-llm-ai-app && pnpm install
-node --input-type=module -e "const m = await import('./lib/index.js'); console.log(typeof m.apply)"   # 烟测：function
+node --input-type=module -e "const m = await import('./lib/index.js'); console.log(typeof m.apply)"   # smoke test: function
 ```
 
-### 2. 接入 profile 工作区
+### 2. Wire it into the profile workspace
 
-`~/.dsh/profiles/desktop/package.json` 的 dependencies 加：
+Add to the dependencies of `~/.dsh/profiles/desktop/package.json`:
 
 ```json
 "@deepseek-ai/dsh-llm-ai": "link:/Users/<you>/Downloads/project/github/dsh-llm-ai-app"
@@ -100,9 +103,9 @@ node --input-type=module -e "const m = await import('./lib/index.js'); console.l
 cd ~/.dsh/profiles/desktop && pnpm install
 ```
 
-### 3. 组合补丁
+### 3. Composition patch
 
-`~/.dsh/profiles/desktop/cordis.patch.yml` 追加（注意保留已有的托管块，如 vibe-island）：
+Append to `~/.dsh/profiles/desktop/cordis.patch.yml` (keep any managed blocks already there, such as vibe-island):
 
 ```yaml
 - id: llm-pi-ai
@@ -112,85 +115,92 @@ cd ~/.dsh/profiles/desktop && pnpm install
       name: '@deepseek-ai/dsh-llm-ai'
 ```
 
-### 4. 命名空间兼容（桌面版内置 UI 专用）
+### 4. Namespace compatibility (for the desktop's bundled UI)
 
-**关键坑**：DSH Desktop 内置的模型配置页（上游 rc.2 构建）硬编码了 `"llm-pi-ai"` 命名空间——添加卡片的启用开关、协议选择、表单布局、写入目标全部只认它。llm-ai 挂载后配置页会退化为"请直接编辑 settings.yaml"提示。
+**The key pitfall**: the Models page bundled with DSH Desktop (an upstream rc.2 build) hardcodes the `"llm-pi-ai"` namespace — the add-card's enable gate, protocol choices, form layout, and write target all recognize that name alone. Once llm-ai mounts, the page degrades to "other fields live in settings.yaml" hints.
 
-解法：给插件拷贝打一个**单字符串补丁**，让它以 `llm-pi-ai` 命名空间注册（目录条目、settings 段、探测注册全部由这一个常量驱动）：
+The fix is a **single-string patch** on the plugin copy so it registers under `llm-pi-ai` (the settings section, directory entries, and discovery registration all flow from this one constant):
 
 ```js
-// dsh-llm-ai-app/lib/index.js —— 全文仅此一处
+// dsh-llm-ai-app/lib/index.js — the only occurrence in the file
 - const NS = settingsNamespace("llm-ai");
 + const NS = settingsNamespace("llm-pi-ai");
 ```
 
-诊断信息前缀（`llm-ai: provider "..."`）无需改动。上游桌面版未来若原生支持 `llm-ai`，改回这个字符串并把 settings 段改名即可回正。
+Diagnostic message prefixes (`llm-ai: provider "..."`) need no change. When an upstream desktop release natively knows `llm-ai`, restore this string and rename the settings section to return to the canonical namespace.
 
-### 5. settings.yaml 迁移
+### 5. settings.yaml migration
 
-`~/.dsh/settings.yaml`：把原 `llm-pi-ai:` 段内容迁移为精选路由（`anthropic-messages` 路由必须移除——整段校验，一条不可服务会拒绝全段）。示例（六条路由）见上文配置参考。凭证引用（`apiKeyEnv` → 环境变量 / `~/.dsh/.credentials.yaml`）不需要任何迁移。
+In `~/.dsh/settings.yaml`, migrate the previous `llm-pi-ai:` section to the curated routes (`anthropic-messages` routes must be removed — validation resolves the whole section, so one unserviceable profile refuses all of it). See the configuration reference above for a six-route example. Credential references (`apiKeyEnv` → environment variables / `~/.dsh/.credentials.yaml`) need no migration at all.
 
-**零中断切换**：应用未重启期间，旧 pi-ai 插件仍在读旧段——迁移时可在新旧两段并存的状态下重启，重启后旧段变为惰性残留，事后删除。
+**Zero-downtime switch**: until the app restarts, the still-running pi-ai plugin keeps reading the old section — migrate with both sections present, restart, and delete the inert old section afterwards.
 
-### 6. models.dev 缓存预播种（可选但推荐）
+### 6. Pre-seed the models.dev cache (optional, recommended)
 
 ```sh
 curl -s https://models.dev/api.json -o ~/.dsh/storages/models-dev-cache.json
 ```
 
-保证首启离线可用；此后插件每次加载仍会尝试刷新，失败时回落缓存。
+This guarantees an offline-capable first boot; the plugin still tries a fresh fetch on every load and falls back to the cache on failure.
 
-### 7. 重启验证
+### 7. Restart and verify
 
-完全退出（⌘Q）再打开 DSH Desktop。预期：六条路由在线、模型选择器可用、Models 页卡片为完整可编辑表单（密钥/端点/协议/模型列表）、添加供应商可用、协议下拉仅 `openai-completions`。
+Fully quit (⌘Q) and reopen DSH Desktop. Expected: the six routes are live, the model picker works, the Models page renders full editable cards (key / endpoint / protocol / model list), the add-provider card is usable, and the protocol dropdown offers `openai-completions` only.
 
-## 故障排查
+## Troubleshooting
 
-| 症状 | 原因与处理 |
+| Symptom | Cause and fix |
 |---|---|
-| 配置页显示"其余字段在 settings.yaml 中，请直接编辑对应段" | 内置 UI 把 `llm-ai` 判为 unknown 布局——第 4 步的命名空间补丁未生效，检查插件拷贝里 `settingsNamespace("llm-pi-ai")` 是否唯一存在 |
-| 修改 `/Applications` 内文件报 `EPERM` | macOS App Management（TCC）保护应用本体，任何无头进程（含用户终端的 node 子进程）都写不进去——这正是本方案不碰 .app 的原因 |
-| 尝试"禁用 bundle 内 UI 条目 + 插入替代品"后应用无法启动 | 桌面组合加载器不接受这种替换（实测会破坏启动）；**不要**通过 profile 补丁替换 web-app 的内置客户端条目 |
-| 同名遮蔽（link 同名包）不生效 | 加载器解析优先级不保证 profile 优先；需要确定性指向时用「独有包名 + 显式条目」或绝对路径（vibe-island 先例） |
-| 整段供应商全部消失 | settings 段里有一条不可服务路由（如 `anthropic-messages`）被整段拒绝；按报错里的路由/模型名修正或移除 |
-| 首启失败提示 models.dev 拉取失败 | 无缓存且网络不可达；执行第 6 步播种 |
+| The Models page shows "Other fields live in settings.yaml; edit that section directly" | The bundled UI classifies `llm-ai` as an unknown layout — the step-4 namespace patch is not in effect; check that `settingsNamespace("llm-pi-ai")` occurs exactly once in the plugin copy |
+| Writing files under `/Applications` fails with `EPERM` | macOS App Management (TCC) protects app bundles from every headless process (including node children of your own terminal) — which is why this procedure never touches the .app |
+| The app fails to start after "disable the bundled UI entry + insert a replacement" | The desktop's composition loader rejects that substitution (verified to break boot); never replace the web-app's built-in client entries through a profile patch |
+| A same-name link (shadowing a bundled package) does not take effect | Resolution precedence is not guaranteed to prefer the profile; when you need determinism, use a unique package name with an explicit entry, or an absolute path (the vibe-island precedent) |
+| Every provider disappears at once | The settings section carries one unserviceable route (for example `anthropic-messages`) and was refused as a whole; fix or remove the route named in the error |
+| First boot fails reporting a models.dev fetch failure | Nothing cached and the network is unreachable; run the step-6 seed |
 
-**完全回滚**：删掉 `cordis.patch.yml` 里的三条补丁 → 把 `settings.yaml.bak-llm-ai-swap` 拷回 `settings.yaml` → 重启。插件目录与 profile 链接可保留（无引用即惰性）。
+**Full rollback**: delete the three patch entries from `cordis.patch.yml` → copy `settings.yaml.bak-llm-ai-swap` back over `settings.yaml` → restart. The install directory and profile link can stay (unreferenced means inert).
 
-## 已知限制（v1）
+## Known limitations (v1)
 
-- 仅 `openai-completions` 协议：anthropic / google / bedrock / vertex / OAuth-only 家族在目录中可见但不可服务，`api` 声明它们会拒绝；`anthropic-messages` 为 v2 计划。
-- 无 replay envelope：跨供应商历史走 provider-neutral 转换（不新增会话日志结构；旧 pi-ai 日志照常加载）。
-- settings 层只能新增/覆盖路由，不能删除组合基线（cordis.yml）里声明的路由。
-- 每路由单协议：混合协议供应商需拆成两个路由键。
-- `tool_choice`、stop 序列不支持（与两个前身一致的 MVP 裁剪）。
+- `openai-completions` only: the anthropic / google / bedrock / vertex / OAuth-only families stay visible in the directory but unserviceable, and naming them under `api` is refused; `anthropic-messages` is planned for v2.
+- No replay envelope: cross-provider history converts provider-neutrally (no new session-log structure; logs recorded by pi-ai still load).
+- The settings layer can add or override routes, never remove routes declared in the composition base (cordis.yml).
+- One wire protocol per route: a mixed-protocol provider splits across two route keys.
+- `tool_choice` and stop sequences are unsupported (an MVP cut shared with both predecessors).
 
-## 开发
+## Development
 
 ```
 src/
-  index.ts       插件 apply：目录加载、休眠/原子注册、settings 段、目录与探测注册
-  adapter.ts     LlmAiAdapter：stream()、逐调用快照冻结、超时/中止、错误分类
-  catalog.ts     profile → 路由/模型解析（models/modelOverrides/compat/reasoning）
-  config.ts      schemastery Config 模式与 resolveProfiles
-  modelsdev.ts   api.json 加载器（拉取/缓存/离线快照，fetchImpl 可注入）
-  serialize.ts   请求序列化、reasoning 分发、图片序列化与卸载
-  sse.ts         eventsource-parser 封装、[DONE] 哨兵、注释看门狗脉冲
-  translate.ts   wire 事件 → StreamChunk 翻译（usage 先于 finish）
-  discovery.ts   GET /models 端点探测
-  provider.ts    协议表（仅 openai-completions）与 withheld 家族
-  types.ts       wire 词汇表
+  index.ts       plugin apply: catalog load, dormant/atomic registration, the
+                 settings section, directory and discovery registration
+  adapter.ts     LlmAiAdapter: stream(), per-call snapshot freeze, timeout and
+                 abort handling, error classification
+  catalog.ts     profile → route/model resolution (models/modelOverrides/
+                 compat/reasoning)
+  config.ts      the schemastery Config schema and resolveProfiles
+  modelsdev.ts   the api.json loader (fetch/cache/offline snapshot, injectable
+                 fetchImpl)
+  serialize.ts   request serialization, reasoning dispatch, image serialization
+                 and offload
+  sse.ts         eventsource-parser framing, the [DONE] sentinel, comment
+                 watchdog pulses
+  translate.ts   wire events → StreamChunk translation (usage precedes finish)
+  discovery.ts   GET /models endpoint interrogation
+  provider.ts    the protocol table (openai-completions only) and withheld
+                 families
+  types.ts       the wire vocabulary
 ```
 
 ```sh
 pnpm install
-npx tsc --noEmit        # 类型检查
-npx vitest run          # 全部测试（204+，无网络依赖）
-npx vitest run --coverage  # 逐文件 100% 覆盖门禁
+npx tsc --noEmit        # typecheck
+npx vitest run          # the whole suite (204+, no network)
+npx vitest run --coverage  # per-file 100% coverage gate
 ```
 
-设计决策的完整记录见部署源仓库的 `.scratch/llm-ai/`（spec + 12 张票的 Resolution）；harness 主仓库的 `packages/llm/llm-ai` 是集成态孪生（含仓库门禁与文档再生成）。本目录是发布与独立开发的源头。
+The complete decision record lives in the deployment source repository under `.scratch/llm-ai/` (the spec plus twelve ticket resolutions); the harness monorepo's `packages/llm/llm-ai` is the integrated twin (with repo gates and doc regeneration). This directory is the origin for publication and standalone development.
 
-## 许可
+## License
 
-MIT（随上游 DeepSeek Harness）。
+MIT (following the upstream DeepSeek Harness).
