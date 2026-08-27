@@ -4,6 +4,8 @@ English | [中文](README.zh.md)
 
 A models.dev-cataloged multi-provider LLM adapter for the DeepSeek Harness: every provider and model fact comes from the community-maintained [models.dev](https://models.dev) `api.json` registry, and the request runtime is a harness-owned `openai-completions` streaming implementation (direct fetch + SSE) with no pi-ai dependency. It replaces `dsh-llm-pi-ai` on the same `ctx.llm` seam.
 
+<img width="2280" height="1702" alt="image" src="https://github.com/user-attachments/assets/28b5c095-4bb2-4f8a-8292-56e1de8a44d7" />
+
 - **Protocol support**: v1 serves `openai-completions` only (the overwhelming majority of OpenAI-compatible endpoints); `anthropic-messages` and other protocols are v2 work.
 - **Verification status**: 205+ unit tests at per-file 100% coverage; deployed as a complete replacement on DSH Desktop 2.0.3 (the dsh 0.1.1-rc.2 family) and in daily use.
 - **Version baseline**: developed against `@deepseek-ai/*@next` (the 0.1.1-rc.2 line); peers are compatible with the same generation.
